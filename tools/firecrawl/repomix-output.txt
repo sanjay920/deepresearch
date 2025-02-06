@@ -1,0 +1,253 @@
+
+================================================================
+Directory Structure
+================================================================
+app/
+  main.py
+.env.sample
+Dockerfile
+README.md
+requirements.txt
+
+================================================================
+Files
+================================================================
+
+================
+File: app/main.py
+================
+import os
+import logging
+from typing import List, Optional
+
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
+from firecrawl import FirecrawlApp
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="Firecrawl Microservice",
+    description=(
+        "A microservice API that wraps Firecrawl to scrape websites and "
+        "convert them into LLM-ready markdown. It exposes two endpoints: one for "
+        "scraping a single URL and another for batch scraping multiple URLs."
+    ),
+    version="1.0.0",
+)
+
+# Retrieve the Firecrawl API key from environment variables.
+FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
+if not FIRECRAWL_API_KEY:
+    logger.error("FIRECRAWL_API_KEY environment variable must be set")
+    raise Exception("FIRECRAWL_API_KEY environment variable must be set")
+
+# Instantiate the Firecrawl client
+firecrawl_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+
+
+class BatchScrapeRequest(BaseModel):
+    urls: List[str]
+    formats: Optional[List[str]] = ["markdown"]
+
+
+@app.get("/scrape", summary="Scrape a single URL")
+def scrape(
+    url: str = Query(..., description="The URL to scrape"),
+    formats: Optional[List[str]] = Query(
+        ["markdown"], description="List of formats (e.g., markdown, html)"
+    ),
+):
+    """
+    Scrape a single URL using Firecrawl and return the converted markdown.
+
+    - **url**: The URL to scrape.
+    - **formats**: A list of formats to return (default is ["markdown"]).
+    """
+    try:
+        result = firecrawl_client.scrape_url(url=url, params={"formats": formats})
+    except Exception as e:
+        logger.exception("Error scraping URL")
+        raise HTTPException(status_code=500, detail="Error scraping URL")
+    return result
+
+
+@app.post("/batch_scrape_urls", summary="Batch scrape multiple URLs")
+def batch_scrape(request: BatchScrapeRequest):
+    """
+    Batch scrape multiple URLs using Firecrawl.
+
+    - **urls**: A list of URLs to scrape.
+    - **formats**: A list of formats to return (default is ["markdown"]).
+    """
+    try:
+        result = firecrawl_client.batch_scrape_urls(
+            request.urls, {"formats": request.formats}
+        )
+    except Exception as e:
+        logger.exception("Error batch scraping URLs")
+        raise HTTPException(status_code=500, detail="Error batch scraping URLs")
+    return result
+
+================
+File: .env.sample
+================
+export FIRECRAWL_API_KEY="YOUR_FIRECRAWL_API_KEY"
+
+================
+File: Dockerfile
+================
+# Use an official Python runtime as a parent image
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+
+# Create and set working directory
+WORKDIR /app
+
+# Copy the requirements file and install dependencies
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy the application code
+COPY ./app /app
+
+# Expose port 80 for the container
+EXPOSE 80
+
+# Run the application using Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80", "--workers", "4"]
+
+================
+File: README.md
+================
+# Firecrawl Microservice
+
+This service is a production-ready API wrapper around the Firecrawl service. It allows you to convert entire websites into LLM-ready markdown by exposing two endpoints:
+
+- **GET /scrape**: Scrape a single URL.
+- **POST /batch_scrape_urls**: Batch scrape multiple URLs.
+
+## Features
+
+- **Single & Batch Scraping:** Scrape one URL or multiple URLs at once.
+- **FastAPI Powered:** Uses FastAPI for a high-performance API.
+- **Dockerized:** Containerized for easy deployment.
+
+## Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) installed on your machine.
+- A valid **Firecrawl API Key**. Set the API key as an environment variable:
+  - `FIRECRAWL_API_KEY`
+
+## Building the Docker Image
+
+Run the following command in the project directory:
+
+```bash
+docker build -t firecrawl-microservice .
+```
+
+## Running the Service
+
+You can run the container while passing in your Firecrawl API credentials. For example, to run the container and map the container’s port 80 to your host’s port 8080, run:
+
+```bash
+docker run -d --name firecrawl-microservice -p 8080:80 \
+  -e FIRECRAWL_API_KEY="YOUR_FIRECRAWL_API_KEY" \
+  firecrawl-microservice
+```
+
+This configuration makes the service accessible at [http://localhost:8080/](http://localhost:8080/).  
+> **Note:** If you choose to map container port 80 to host port 80 (i.e. using `-p 80:80`), update your requests accordingly (e.g. `http://localhost/scrape?...`).
+
+## API Endpoints
+
+### `GET /scrape`
+
+**Query Parameters:**
+
+- `url` (required): The URL to scrape.
+- `formats` (optional): A list of output formats (default: `["markdown"]`).
+
+**Example Request:**
+
+```bash
+curl "http://localhost:8080/scrape?url=https://openai.com/index/openai-o3-mini/&formats=markdown"
+```
+
+**Example Response:**
+
+```json
+{
+  "markdown": "![...](...)\n\nYour scraped content in markdown..."
+}
+```
+
+### `POST /batch_scrape_urls`
+
+**Request Body:**
+
+```json
+{
+  "urls": [
+    "https://www.example.com/page1",
+    "https://www.example.com/page2"
+  ],
+  "formats": ["markdown"]
+}
+```
+
+**Example Response:**
+
+```json
+{
+  "success": true,
+  "data": [
+    {"markdown": "Scraped markdown for page1..."},
+    {"markdown": "Scraped markdown for page2..."}
+  ]
+}
+```
+
+## Local Development
+
+If you prefer running the service locally without Docker:
+
+1. **Create a Virtual Environment & Install Dependencies:**
+
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+2. **Set Environment Variables:**
+
+   ```bash
+   export FIRECRAWL_API_KEY="YOUR_FIRECRAWL_API_KEY"
+   ```
+
+3. **Run the Service Using Uvicorn:**
+
+   ```bash
+   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   ```
+
+   The service will be available at [http://localhost:8000/](http://localhost:8000/).
+
+## Troubleshooting
+
+- **Port Conflicts:**  
+  If you receive an error such as "port is already allocated," try mapping to a different host port (for example, using `-p 8080:80`).
+
+================
+File: requirements.txt
+================
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+firecrawl-py==1.11.0
