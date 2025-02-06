@@ -5,7 +5,7 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1
 
 # Create and set working directory
-WORKDIR /app
+WORKDIR /
 
 # Copy the requirements file and install dependencies
 COPY requirements.txt .
@@ -19,5 +19,6 @@ COPY ./app /app
 EXPOSE 80
 
 # Run the application using Uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80", "--workers", "4"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--workers", "4"]
+
 
