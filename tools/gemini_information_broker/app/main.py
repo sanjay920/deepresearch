@@ -1,10 +1,11 @@
 import os
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+import requests
 
 # Import the Gemini client libraries.
 from google import genai
@@ -33,6 +34,30 @@ if not GEMINI_API_KEY:
 
 # Instantiate the Gemini client.
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+# Add cache for TinyURLs to avoid repeated API calls
+tinyurl_cache: Dict[str, str] = {}
+
+
+def get_tinyurl(long_url: str) -> str:
+    """Convert a long URL to a TinyURL, using cache to avoid duplicate calls."""
+    if long_url in tinyurl_cache:
+        return tinyurl_cache[long_url]
+
+    try:
+        api_endpoint = "https://tinyurl.com/api-create.php"
+        params = {"url": long_url}
+        response = requests.get(api_endpoint, params=params, timeout=5)
+
+        if response.status_code == 200:
+            short_url = response.text
+            tinyurl_cache[long_url] = short_url
+            return short_url
+    except Exception as e:
+        logger.warning(f"Failed to create TinyURL for {long_url}: {e}")
+
+    # Return original URL if TinyURL creation fails
+    return long_url
 
 
 class GenerateRequest(BaseModel):
@@ -138,32 +163,30 @@ def optimize_citations(grounding_metadata, max_sources=5):
 
 
 def format_text_with_optimized_citations(response, max_sources=5):
-    """Format the generated text by appending inline citations for grounded segments.
-    Also generate a list of sources and search queries used.
-    """
+    """Format text with citations and include sources and search queries."""
     text = response.candidates[0].content.parts[0].text
     grounding_metadata = response.candidates[0].grounding_metadata
 
-    # If no grounding metadata or no grounding supports are present, return the original text.
+    # If no grounding metadata or no grounding supports are present, return the original text
     if not grounding_metadata or not grounding_metadata.grounding_supports:
         return text
 
-    # Get optimized citations per segment.
+    # Get optimized citations per segment
     segment_citations, selected_chunks = optimize_citations(
         grounding_metadata, max_sources
     )
 
     modified_text = text
-    citation_references = {}  # Map chunk_index to a reference number.
+    citation_references = {}  # Map chunk_index to a reference number
     used_chunks = set()
     for citations in segment_citations.values():
         used_chunks.update(citations)
 
-    # Assign reference numbers.
+    # Assign reference numbers
     for i, chunk_index in enumerate(sorted(used_chunks), 1):
         citation_references[chunk_index] = i
 
-    # Process each segment in reverse order (to preserve string indices).
+    # Process each segment in reverse order (to preserve string indices)
     segments = [
         (support.segment, i)
         for i, support in enumerate(grounding_metadata.grounding_supports)
@@ -189,21 +212,23 @@ def format_text_with_optimized_citations(response, max_sources=5):
                     segment.text, f"{segment.text}{citation_string}"
                 )
 
-    # Build the sources list and search queries section.
+    # Build the sources list with TinyURLs
     sources = []
     for chunk_index, ref_num in sorted(citation_references.items(), key=lambda x: x[1]):
         web_info = grounding_metadata.grounding_chunks[chunk_index].web
         if web_info:
-            sources.append(f"{ref_num}. [{web_info.title}]({web_info.uri})")
+            # Convert vertexaisearch URLs to TinyURLs
+            if "vertexaisearch.cloud.google.com" in web_info.uri:
+                short_url = get_tinyurl(web_info.uri)
+                sources.append(f"{ref_num}. [{web_info.title}]({short_url})")
+            else:
+                sources.append(f"{ref_num}. [{web_info.title}]({web_info.uri})")
 
-    # Get search queries from the metadata.
-    search_queries = grounding_metadata.web_search_queries
-
-    # Combine everything.
+    # Combine everything
     output = [modified_text, "\nSources:"]
     output.extend(sources)
 
-    # Add search queries if they exist.
+    # Add search queries if they exist
     if grounding_metadata.web_search_queries:
         output.extend(
             [
