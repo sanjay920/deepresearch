@@ -6,8 +6,10 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import requests
+import json
 
 # Import the Gemini client libraries.
+
 from google import genai
 from google.genai import types
 
@@ -16,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Gemini Microservice",
+    title="Information Broker Microservice Powered by Gemini",
     description=(
         "A microservice API that wraps the Gemini API. It accepts a prompt, "
         "calls Gemini to generate content, formats the response with inline "
@@ -37,6 +39,9 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Add cache for TinyURLs to avoid repeated API calls
 tinyurl_cache: Dict[str, str] = {}
+
+# Add this constant after other constants
+INFORMATION_BROKER_URL = "http://localhost:8081/generate"
 
 
 def get_tinyurl(long_url: str) -> str:
@@ -261,6 +266,35 @@ def generate_text(request: GenerateRequest):
 
     formatted_text = format_text_with_optimized_citations(response, max_sources=5)
     return {"response": formatted_text}
+
+
+def query_information_broker(query: str) -> str:
+    """Query the Information Broker service."""
+    try:
+        response = requests.post(
+            INFORMATION_BROKER_URL,
+            json={"prompt": query},
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()["response"]
+    except Exception as e:
+        logger.error(f"Error querying Information Broker: {e}")
+        raise HTTPException(status_code=500, detail="Error querying Information Broker")
+
+
+@app.post("/route", summary="Route query through Information Broker")
+async def route_query(request: dict):
+    """Route the query through the Information Broker service."""
+    try:
+        if "message" not in request:
+            raise HTTPException(status_code=400, detail="Message field is required")
+            
+        response = query_information_broker(request["message"])
+        return {"response": response}
+    except Exception as e:
+        logger.exception("Error processing query")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
