@@ -7,11 +7,40 @@ import json
 import httpx
 from typing import Optional
 
+
+# Configure logging with a more robust format
+class CustomFormatter(logging.Formatter):
+    """Custom formatter that handles missing correlation IDs gracefully"""
+
+    def format(self, record):
+        if not hasattr(record, "correlation_id"):
+            # Get correlation ID from the main logger if available
+            main_logger = logging.getLogger("main")
+            if hasattr(main_logger, "correlation_id"):
+                record.correlation_id = main_logger.correlation_id
+            else:
+                record.correlation_id = "no_id"
+        return super().format(record)
+
+
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s",
+formatter = CustomFormatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s"
 )
+
+# Remove any existing handlers
+logging.getLogger().handlers.clear()
+
+# Create and configure handler
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.addHandler(handler)
+root_logger.setLevel(logging.INFO)
+
+# Configure our application logger
 logger = logging.getLogger(__name__)
 
 
@@ -20,10 +49,12 @@ class CorrelationIDFilter(logging.Filter):
     """Adds correlation ID to log records"""
 
     def __init__(self):
+        super().__init__()
         self.correlation_id = None
 
     def filter(self, record):
-        record.correlation_id = getattr(record, "correlation_id", "no_id")
+        if not hasattr(record, "correlation_id"):
+            record.correlation_id = getattr(self, "correlation_id", "no_id")
         return True
 
 
@@ -62,6 +93,17 @@ async def route_query(request: RouteRequest):
     # Generate correlation ID for this request
     correlation_id = f"req_{os.urandom(6).hex()}"
     correlation_filter.correlation_id = correlation_id
+
+    # Store correlation ID at module level for other loggers to access
+    logging.getLogger("main").correlation_id = correlation_id
+
+    # Set correlation ID for httpx logger
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(f, CorrelationIDFilter) for f in httpx_logger.filters):
+        httpx_logger.addFilter(CorrelationIDFilter())
+    for f in httpx_logger.filters:
+        if isinstance(f, CorrelationIDFilter):
+            f.correlation_id = correlation_id
 
     logger.info(
         f"Received routing request",
