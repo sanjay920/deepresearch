@@ -3,10 +3,32 @@ import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
+import json
+import httpx
+from typing import Optional
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
+
+
+# Add correlation ID filter
+class CorrelationIDFilter(logging.Filter):
+    """Adds correlation ID to log records"""
+
+    def __init__(self):
+        self.correlation_id = None
+
+    def filter(self, record):
+        record.correlation_id = getattr(record, "correlation_id", "no_id")
+        return True
+
+
+logger.addFilter(CorrelationIDFilter())
+correlation_filter = logger.filters[0]
 
 app = FastAPI(
     title="Router Microservice",
@@ -15,6 +37,9 @@ app = FastAPI(
 )
 
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+# Get broker host from environment variable, default to localhost
+BROKER_HOST = os.getenv("BROKER_HOST", "localhost")
 
 
 class RouteRequest(BaseModel):
@@ -34,6 +59,18 @@ async def route_query(request: RouteRequest):
     }
     ```
     """
+    # Generate correlation ID for this request
+    correlation_id = f"req_{os.urandom(6).hex()}"
+    correlation_filter.correlation_id = correlation_id
+
+    logger.info(
+        f"Received routing request",
+        extra={
+            "correlation_id": correlation_id,
+            "message_length": len(request.message),
+        },
+    )
+
     # Define the system message as a list of content items (each with text and type)
     system_message_content = [
         {
@@ -48,25 +85,33 @@ async def route_query(request: RouteRequest):
                 'Fruit and Vegetable Division, AMS, U. S. Department of Agriculture, Washington 25, D. C."[1]\n\n\n'
                 "Sources:\n"
                 "1. [wikimedia.org](https://tinyurl.com/2cobgzpz)\n"
-                "2. [ncrfsma.org](https://tinyurl.com/269njje2)\n\n\n"
+                "2. [ncrfsma.org](https://tinyurl.com/269njje2)\n...Additionally Sources Here\n\n"
                 "# Steps\n\n"
                 "1. Analyze the user's query:\n"
                 "   - Determine if the query is complex or straightforward.\n"
                 "   - Use complexity cues (e.g., open-ended questions, ambiguous terms).\n\n"
                 "2. Route or respond:\n"
-                "   - If complex, forward the query to the planning assistant.\n"
-                '   - If straightforward, attempt to answer using available functions (e.g., "what is the date today?").\n\n'
+                "   - If complex, set is_complex to true with no response field.\n"
+                "   - If straightforward, provide answer in the response field.\n\n"
                 "# Output Format\n\n"
                 "Your output must be in the following JSON format (and nothing else):\n\n"
+                "For complex queries:\n"
                 "```json\n"
                 "{\n"
-                '  "is_complex": [true/false],\n'
-                '  "response/routing": [response or indicate routing to planning assistant]\n'
+                '  "is_complex": true\n'
+                "}\n"
+                "```\n\n"
+                "For simple queries:\n"
+                "```json\n"
+                "{\n"
+                '  "is_complex": false,\n'
+                '  "response": "your response here"\n'
                 "}\n"
                 "```\n\n"
                 "# Notes\n\n"
                 "- Ensure clarity and precision in determining the complexity of queries.\n"
-                "- Adjust the response based on the complexity assessment."
+                "- For complex queries, only return is_complex=true with no response field.\n"
+                "- For simple queries, provide the response in the response field."
             ),
             "type": "text",
         }
@@ -88,6 +133,15 @@ async def route_query(request: RouteRequest):
             ],
         },
     ]
+
+    logger.debug(
+        "Sending request to OpenAI",
+        extra={
+            "correlation_id": correlation_id,
+            "model": "gpt-4o",
+            "message_count": len(messages),
+        },
+    )
 
     try:
         response = client.chat.completions.create(
@@ -121,10 +175,88 @@ async def route_query(request: RouteRequest):
             frequency_penalty=0,
             presence_penalty=0,
         )
-        # The response is already a JSON object per the response_format.
-        parsed_response = response
+
+        # Add logging for tool calls
+        if response.choices[0].message.tool_calls:
+            logger.info(
+                "Processing tool calls",
+                extra={
+                    "correlation_id": correlation_id,
+                    "tool_name": response.choices[0]
+                    .message.tool_calls[0]
+                    .function.name,
+                },
+            )
+
+            tool_call = response.choices[0].message.tool_calls[0]
+            if tool_call.function.name == "query_information_broker":
+                # Parse the function arguments
+                args = json.loads(tool_call.function.arguments)
+
+                # Make request to information broker service using configured host
+                broker_url = f"http://{BROKER_HOST}:8081/generate"
+                async with httpx.AsyncClient() as http_client:
+                    logger.info(
+                        "Making request to information broker",
+                        extra={
+                            "correlation_id": correlation_id,
+                            "broker_url": broker_url,
+                        },
+                    )
+                    broker_response = await http_client.post(
+                        broker_url, json={"prompt": args["query"]}, timeout=30.0
+                    )
+                    broker_data = broker_response.json()
+
+                # Create a follow-up message with the broker's response
+                messages.append(
+                    {"role": "assistant", "content": None, "tool_calls": [tool_call]}
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(broker_data),
+                    }
+                )
+
+                # Get final response from OpenAI
+                final_response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    temperature=0.07,
+                    max_completion_tokens=10831,
+                    top_p=1,
+                    frequency_penalty=0,
+                    presence_penalty=0,
+                )
+                content = final_response.choices[0].message.content
+
+        else:
+            content = response.choices[0].message.content
+
+        if content is None:
+            raise ValueError("No content received from OpenAI")
+
+        parsed_response = json.loads(content)
+        logger.info(
+            "Successfully processed request",
+            extra={
+                "correlation_id": correlation_id,
+                "is_complex": parsed_response.get("is_complex"),
+            },
+        )
+
     except Exception as e:
-        logger.exception("Error processing query")
-        raise HTTPException(status_code=500, detail="Error processing query")
+        logger.exception(
+            "Error processing query",
+            extra={
+                "correlation_id": correlation_id,
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+            },
+        )
+        raise HTTPException(status_code=500, detail=str(e))
 
     return parsed_response
