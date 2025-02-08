@@ -6,6 +6,7 @@ from openai import OpenAI
 import json
 import httpx
 from typing import Optional
+from datetime import datetime
 
 
 # Configure logging with a more robust format
@@ -114,46 +115,81 @@ async def route_query(request: RouteRequest):
     )
 
     # Define the system message as a list of content items (each with text and type)
+    current_date = datetime.now().strftime("%B %d, %Y %H:%M:%S")
     system_message_content = [
         {
             "text": (
+                f"As a reminder, today's date is {current_date}. Avoid using ambiguous terms like 'today' or 'yesterday'\n\n"
                 "You are a routing agent tasked with determining the complexity of user queries and providing appropriate responses. "
-                "If the user's query is complex and challenging, route it to the planning assistant. For less complex queries, utilize available functions to provide an immediate response. "
-                "If you choose to use the query_information_broker tool, the query you give it must consist of complete sentences - you dont want to disrespect your colleague. "
-                "If you do call query_information_broker, make sure to include citations in your final response back to the user the same way the query_information_broker does citations - here's an example:\n\n"
-                "*   **Dried or Dehydrated Products:** Including items specifically marked as dehydrated.[1, 2, 3, 4]\n"
-                "*   **Frozen or Chilled Products:** Including items in the Frozen/Chilled section.[1, 3, 5]\n\n"
-                'The search results indicate that you can request copies of these standards from the "Processed Products Standardization and Inspection Branch, '
-                'Fruit and Vegetable Division, AMS, U. S. Department of Agriculture, Washington 25, D. C."[1]\n\n\n'
-                "Sources:\n"
-                "1. [wikimedia.org](https://tinyurl.com/2cobgzpz)\n"
-                "2. [ncrfsma.org](https://tinyurl.com/269njje2)\n...Additionally Sources Here\n\n"
-                "# Steps\n\n"
-                "1. Analyze the user's query:\n"
-                "   - Determine if the query is complex or straightforward.\n"
-                "   - Use complexity cues (e.g., open-ended questions, ambiguous terms).\n\n"
-                "2. Route or respond:\n"
-                "   - If complex, set is_complex to true with no response field.\n"
-                "   - If straightforward, provide answer in the response field.\n\n"
-                "# Output Format\n\n"
-                "Your output must be in the following JSON format (and nothing else):\n\n"
-                "For complex queries:\n"
-                "```json\n"
-                "{\n"
-                '  "is_complex": true\n'
-                "}\n"
-                "```\n\n"
-                "For simple queries:\n"
-                "```json\n"
-                "{\n"
-                '  "is_complex": false,\n'
-                '  "response": "your response here"\n'
-                "}\n"
-                "```\n\n"
-                "# Notes\n\n"
-                "- Ensure clarity and precision in determining the complexity of queries.\n"
-                "- For complex queries, only return is_complex=true with no response field.\n"
-                "- For simple queries, provide the response in the response field."
+                "Your job is to analyze the query and decide whether it is complex or straightforward. Follow these steps:\n\n"
+                "1. Analyze the Query:\n"
+                "   - If the query is complex, ambiguous, or open-ended, return:\n"
+                "     ```json\n"
+                "     {\n"
+                '       "is_complex": true\n'
+                "     }\n"
+                "     ```\n"
+                "     Do not provide any additional response. This signals that the query should be routed to the planning assistant.\n"
+                "   - If the query is straightforward, proceed to step 2.\n\n"
+                "2. Provide a Response:\n"
+                "   You have two options for straightforward queries:\n"
+                "   a. **Direct Answer:** Generate your own answer and return:\n"
+                "      ```json\n"
+                "      {\n"
+                '        "is_complex": false,\n'
+                '        "response": "your response here"\n'
+                "      }\n"
+                "      ```\n"
+                "   b. **Use the query_information_broker Tool:**\n"
+                "      - Ensure the query you send to `query_information_broker` is written as a complete, respectful sentence.\n"
+                "      - After receiving the tool's output, evaluate it:\n"
+                "         - **If the tool's output is fully sufficient as the final answer** (i.e. it includes all necessary information and follows the required citation format), return:\n"
+                "           ```json\n"
+                '           {"pass": true}\n'
+                "           ```\n"
+                "           This signals the upstream system to use the tool's answer.\n"
+                "         - **If the tool's output is not appropriate** (e.g. it is incomplete, lacks citations, or does not meet the required standards), ignore the tool's output and generate your own answer. In that case, return your answer in the following format:\n"
+                "           ```json\n"
+                "           {\n"
+                '             "is_complex": false,\n'
+                '             "response": "your response here"\n'
+                "           }\n"
+                "           ```\n\n"
+                "3. Citation Guidelines:\n"
+                "   - If citations are provided or required, ensure they follow this format:\n"
+                "     - **Example Entry:**\n"
+                "       - **Dried or Dehydrated Products:** Including items specifically marked as dehydrated.[1, 2, 3, 4]\n"
+                "       - **Frozen or Chilled Products:** Including items in the Frozen/Chilled section.[1, 3, 5]\n"
+                "     - The answer might include:\n"
+                "       ```\n"
+                "       Sources:\n"
+                "       1. [wikimedia.org](https://tinyurl.com/2cobgzpz)\n"
+                "       2. [ncrfsma.org](https://tinyurl.com/269njje2)\n"
+                "       ```\n\n"
+                "4. Output Format:\n"
+                "   - For complex queries:\n"
+                "     ```json\n"
+                "     {\n"
+                '       "is_complex": true\n'
+                "     }\n"
+                "     ```\n"
+                "   - For simple queries answered directly:\n"
+                "     ```json\n"
+                "     {\n"
+                '       "is_complex": false,\n'
+                '       "response": "your response here"\n'
+                "     }\n"
+                "     ```\n"
+                "   - For queries answered via the tool (when the tool's output is fully sufficient - meaning full, complete sentences with all the info that you would expect from a good assistant):\n"
+                "     ```json\n"
+                "     {\n"
+                '       "pass": true\n'
+                "     }\n"
+                "     ```\n\n"
+                "Notes:\n"
+                "- Always ensure your query to the tool is a complete, respectful sentence.\n"
+                "- Only output the specified JSON object with no additional commentary.\n"
+                "- **Critical:** When using the tool, if the tool's response is inappropriate for any reason, do not use it. Instead, generate your own answer in the direct response format."
             ),
             "type": "text",
         }
@@ -282,6 +318,39 @@ async def route_query(request: RouteRequest):
             raise ValueError("No content received from OpenAI")
 
         parsed_response = json.loads(content)
+
+        # Handle the "pass" case by processing the tool output
+        if parsed_response.get("pass"):
+            if not response.choices[0].message.tool_calls:
+                raise ValueError("Pass response received but no tool output found")
+
+            # Get the last tool response
+            last_tool_message = next(
+                msg for msg in reversed(messages) if msg["role"] == "tool"
+            )
+
+            # Extract content and remove search queries section
+            tool_content = last_tool_message["content"]
+            if isinstance(tool_content, list):
+                tool_content = tool_content[0]["text"]
+            elif isinstance(tool_content, str):
+                try:
+                    # Try to parse if it's a JSON string
+                    parsed_tool_content = json.loads(tool_content)
+                    if (
+                        isinstance(parsed_tool_content, dict)
+                        and "response" in parsed_tool_content
+                    ):
+                        tool_content = parsed_tool_content["response"]
+                except json.JSONDecodeError:
+                    # If not JSON, use as-is
+                    pass
+
+            clean_content = tool_content.split("Search Queries:")[0].strip()
+
+            # Return modified response with the cleaned tool content
+            parsed_response = {"is_complex": False, "response": clean_content}
+
         logger.info(
             "Successfully processed request",
             extra={
