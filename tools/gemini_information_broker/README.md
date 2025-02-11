@@ -34,7 +34,7 @@ docker build -t gemini-information-broker .
 
 ## Running the Service
 
-Run the container while passing in your Gemini API credentials. For example, to run the container and map the container’s port 80 to your host’s port 8080:
+Run the container while passing in your Gemini API credentials. For example, to run the container and map the container’s port 80 to your host’s port 8081:
 
 ```bash
 docker run -d --name gemini-information-broker -p 8081:80 \
@@ -59,7 +59,7 @@ The service will be available at [http://localhost:8081/](http://localhost:8081/
 **Example Request using curl:**
 
 ```bash
-curl -X POST http://localhost:8080/generate \
+curl -X POST http://localhost:8081/generate \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Explain how the Gemini API works."}'
 ```
@@ -104,4 +104,4 @@ If you prefer running the service locally without Docker:
   Ensure the `GEMINI_API_KEY` environment variable is set.
 
 - **Port Conflicts:**  
-  If you encounter port conflicts, change the host port when running the container (e.g., `-p 8080:80`).
+  If you encounter port conflicts, change the host port when running the container (e.g., `-p 8081:80`).
