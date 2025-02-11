@@ -26,7 +26,7 @@ This service is a production-ready API wrapper around Google Custom Search. It e
 Run the container while passing in your Google API credentials:
 
 ```bash
-docker run -d --name google-search-api -p 80:80 \
+docker run -d --name google-search-api -p 8085:80 \
   -e GOOGLE_API_KEY="YOUR_GOOGLE_API_KEY" \
   -e GOOGLE_CSE_ID="YOUR_GOOGLE_CSE_ID" \
   google-search-api
@@ -102,7 +102,7 @@ If you prefer to run the service without Docker, follow these steps:
 3. **Run the Service Using Uvicorn:**
 
    ```bash
-   uvicorn main:app --reload --host 0.0.0.0 --port 8000
+   uvicorn main:app --reload --host 0.0.0.0 --port 8085
    ```
 
-   The service will be available at [http://localhost:8000/](http://localhost:8000/).
+   The service will be available at [http://localhost:8085/](http://localhost:8085/).
