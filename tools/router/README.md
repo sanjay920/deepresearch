@@ -50,10 +50,10 @@ You can set this variable directly or use the provided `.env.sample` file as a t
 3. **Run the service:**
 
    ```bash
-   uvicorn main:app --reload --host 0.0.0.0 --port 8000
+   uvicorn main:app --reload --host 0.0.0.0 --port 8003
    ```
 
-   The service will be available at [http://localhost:8000/route](http://localhost:8000/route).
+   The service will be available at [http://localhost:8003/route](http://localhost:8003/route).
 
 ## Docker
 
@@ -68,10 +68,10 @@ To build and run the service using Docker:
 2. **Run the Docker container:**
 
    ```bash
-   docker run -d --name router-service -p 8080:80 -e OPENAI_API_KEY="YOUR_OPENAI_API_KEY" router-service
+   docker run -d --name router-service -p 8082:80 -e OPENAI_API_KEY="YOUR_OPENAI_API_KEY" router-service
    ```
 
-   The service will be accessible at [http://localhost:8080/route](http://localhost:8080/route).
+   The service will be accessible at [http://localhost:8082/route](http://localhost:8082/route).
 
 ## Notes
 
