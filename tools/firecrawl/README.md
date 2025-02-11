@@ -28,15 +28,15 @@ docker build -t firecrawl-microservice .
 
 ## Running the Service
 
-You can run the container while passing in your Firecrawl API credentials. For example, to run the container and map the container’s port 80 to your host’s port 8080, run:
+You can run the container while passing in your Firecrawl API credentials. For example, to run the container and map the container’s port 80 to your host’s port 8084, run:
 
 ```bash
-docker run -d --name firecrawl-microservice -p 8080:80 \
+docker run -d --name firecrawl-microservice -p 8084:80 \
   -e FIRECRAWL_API_KEY="YOUR_FIRECRAWL_API_KEY" \
   firecrawl-microservice
 ```
 
-This configuration makes the service accessible at [http://localhost:8080/](http://localhost:8080/).  
+This configuration makes the service accessible at [http://localhost:8084/](http://localhost:8084/).  
 > **Note:** If you choose to map container port 80 to host port 80 (i.e. using `-p 80:80`), update your requests accordingly (e.g. `http://localhost/scrape?...`).
 
 ## Caching
@@ -64,7 +64,7 @@ Scrapes a single URL.
 **Example Request:**
 
 ```bash
-curl "http://localhost:8080/scrape?url=https://openai.com/index/&formats=markdown&force_fetch=true"
+curl "http://localhost:8084/scrape?url=https://openai.com/index/&formats=markdown&force_fetch=true"
 ```
 
 **Example Response:**
@@ -131,15 +131,15 @@ If you prefer running the service locally without Docker:
 3. **Run the Service Using Uvicorn:**
 
    ```bash
-   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   uvicorn app.main:app --reload --host 0.0.0.0 --port 8003
    ```
 
-   The service will be available at [http://localhost:8000/](http://localhost:8000/).
+   The service will be available at [http://localhost:8003/](http://localhost:8003/).
 
 ## Troubleshooting
 
 - **Port Conflicts:**  
-  If you receive an error such as "port is already allocated," try mapping to a different host port (for example, using `-p 8080:80`).
+  If you receive an error such as "port is already allocated," try mapping to a different host port (for example, using `-p 8084:80`).
 - **Clearing Cache:**  
   If you suspect the cache is stale or you want to reset it, stop the service and remove `app/cache.db`.
 - **Environment Variables:**  
