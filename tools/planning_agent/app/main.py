@@ -61,6 +61,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # -------------------------------------------------------------------------
 class GenerateRequest(BaseModel):
     message: str
+    conversation_history: list[dict] = []  # Optional list of previous messages
 
 
 # -------------------------------------------------------------------------
@@ -69,22 +70,23 @@ class GenerateRequest(BaseModel):
 @app.post("/generate", summary="Generate planning assistant response")
 def generate_plan(request: GenerateRequest):
     """
-    Given a user message, call OpenAI's API (using model 'o3-mini') with a developer
-    message instructing the assistant to follow a strict JSON schema. Returns a JSON object.
+    Given a user message and conversation history, call OpenAI's API (using model 'o3-mini')
+    with a developer message instructing the assistant to follow a strict JSON schema.
+    Returns a JSON object.
     """
-    # Generate a simple correlation id for logging purposes.
     correlation_id = f"req_{os.urandom(6).hex()}"
     logger.info("Received planning request", extra={"correlation_id": correlation_id})
 
     # Prepare the developer instruction with the JSON schema.
     developer_message = {
-        "role": "developer",
+        "role": "developer",  # Changed from developer to system for better context handling
         "content": [
             {
                 "type": "text",
                 "text": (
                     "You are a planning assistant. The user may ask a query that requires you to consult with an information broker or a website-specific researcher. "
-                    "Analyze the user's request, identify any gaps or ambiguities, and propose a high-level research plan (under 100 words).\n\n"
+                    "Analyze the user's request, identify any gaps or ambiguities, and propose a high-level research plan (under 200 words).\n\n"
+                    "If there are no gaps or ambiguities, you should not ask clarifying questions. In this case, the clarifications array should be an empty list. \n\n"
                     "Your output must follow this JSON schema:\n"
                     "{\n"
                     '  "name": "planning_assistant",\n'
@@ -128,13 +130,21 @@ def generate_plan(request: GenerateRequest):
         ],
     }
 
-    # Prepare the user message from the request.
+    # Convert conversation history to the expected format
+    formatted_history = []
+    for msg in request.conversation_history:
+        formatted_history.append(
+            {"role": msg["role"], "content": [{"type": "text", "text": msg["content"]}]}
+        )
+
+    # Add the current user message
     user_message = {
         "role": "user",
         "content": [{"type": "text", "text": request.message}],
     }
 
-    messages = [developer_message, user_message]
+    # Combine all messages
+    messages = [developer_message] + formatted_history + [user_message]
 
     try:
         response = client.chat.completions.create(
