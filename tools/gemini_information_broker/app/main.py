@@ -12,6 +12,13 @@ import json
 
 from google import genai
 from google.genai import types
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
+from google.genai.errors import ServerError
 
 # Configure logging.
 logging.basicConfig(level=logging.INFO)
@@ -245,6 +252,23 @@ def format_text_with_optimized_citations(response, max_sources=5):
     return "\n".join(output)
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    retry=retry_if_exception_type(ServerError),
+)
+def generate_content_with_retry(client, prompt):
+    """Generate content with retry logic for handling server errors."""
+    return client.models.generate_content(
+        model="gemini-2.0-pro-exp-02-05",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=f"You are a helpful assistant. Today's date is {datetime.now().strftime('%Y-%m-%d')}",
+            tools=[types.Tool(google_search=types.GoogleSearchRetrieval)],
+        ),
+    )
+
+
 @app.post("/generate", summary="Generate text using Gemini API")
 def generate_text(request: GenerateRequest):
     """
@@ -252,17 +276,16 @@ def generate_text(request: GenerateRequest):
     Returns the generated text with inline citations (if available).
     """
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-pro-exp-02-05",
-            contents=request.prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=f"You are a helpful assistant. Today's date is {datetime.now().strftime('%Y-%m-%d')}",
-                tools=[types.Tool(google_search=types.GoogleSearchRetrieval)],
-            ),
+        response = generate_content_with_retry(client, request.prompt)
+    except ServerError as e:
+        logger.exception("Gemini API server error after retries")
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini API is temporarily unavailable. Please try again later.",
         )
     except Exception as e:
         logger.exception("Error calling Gemini API")
-        raise HTTPException(status_code=500, detail="Error generating text")
+        raise HTTPException(status_code=500, detail="Error generating text: " + str(e))
 
     formatted_text = format_text_with_optimized_citations(response, max_sources=5)
     return {"response": formatted_text}
@@ -272,9 +295,7 @@ def query_information_broker(query: str) -> str:
     """Query the Information Broker service."""
     try:
         response = requests.post(
-            INFORMATION_BROKER_URL,
-            json={"prompt": query},
-            timeout=30
+            INFORMATION_BROKER_URL, json={"prompt": query}, timeout=30
         )
         response.raise_for_status()
         return response.json()["response"]
@@ -289,7 +310,7 @@ async def route_query(request: dict):
     try:
         if "message" not in request:
             raise HTTPException(status_code=400, detail="Message field is required")
-            
+
         response = query_information_broker(request["message"])
         return {"response": response}
     except Exception as e:
