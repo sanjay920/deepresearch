@@ -5,6 +5,7 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from firecrawl import FirecrawlApp
+import requests
 
 from . import cache  # NEW - our caching module
 
@@ -66,15 +67,51 @@ def scrape(
 
         # Either cache miss or force_fetch is True -> scrape from Firecrawl
         logger.info(f"Scraping fresh content for URL: {url}, formats={formats}")
-        result = firecrawl_client.scrape_url(url=url, params={"formats": formats})
-
-        # Store in cache
-        cache.store_result(url, formats, result)
+        try:
+            result = firecrawl_client.scrape_url(url=url, params={"formats": formats})
+            # Store in cache
+            cache.store_result(url, formats, result)
+            return result
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                logger.error("Firecrawl API key authentication failed")
+                raise HTTPException(
+                    status_code=503,  # Service Unavailable
+                    detail={
+                        "error": "authentication_failed",
+                        "message": "Firecrawl authentication failed. Please check API key configuration.",
+                    },
+                )
+            else:
+                logger.exception(f"HTTP error during scraping: {str(e)}")
+                raise HTTPException(
+                    status_code=502,  # Bad Gateway
+                    detail={
+                        "error": "scraping_failed",
+                        "message": f"Error scraping URL: {str(e)}",
+                    },
+                )
+        except Exception as e:
+            logger.exception("Unexpected error during scraping")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "internal_error",
+                    "message": f"Unexpected error: {str(e)}",
+                },
+            )
 
     except Exception as e:
-        logger.exception("Error scraping URL")
-        raise HTTPException(status_code=500, detail="Error scraping URL")
-    return result
+        logger.exception("Error in scrape endpoint")
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"Internal server error: {str(e)}",
+            },
+        )
 
 
 @app.post("/batch_scrape_urls", summary="Batch scrape multiple URLs")
