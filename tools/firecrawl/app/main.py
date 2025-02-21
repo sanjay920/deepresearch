@@ -2,12 +2,12 @@ import os
 import logging
 from typing import List, Optional
 
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
-from firecrawl import FirecrawlApp
-import requests
 
-from . import cache  # NEW - our caching module
+from firecrawl import FirecrawlApp
+from . import cache  # our caching module
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +36,7 @@ firecrawl_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
 class BatchScrapeRequest(BaseModel):
     urls: List[str]
     formats: Optional[List[str]] = ["markdown"]
-    force_fetch: bool = False  # << NEW param for batch
+    force_fetch: bool = False  # Bypass cache if true
 
 
 @app.get("/scrape", summary="Scrape a single URL")
@@ -51,11 +51,8 @@ def scrape(
     ),
 ):
     """
-    Scrape a single URL using Firecrawl and return the converted markdown.
-
-    - **url**: The URL to scrape.
-    - **formats**: A list of formats to return (default is ["markdown"]).
-    - **force_fetch**: If true, bypass cache and fetch fresh data.
+    Scrape a single URL using Firecrawl and return the converted result.
+    Uses a cache when not forcing a fresh fetch.
     """
     try:
         if not force_fetch:
@@ -65,18 +62,18 @@ def scrape(
                 logger.info(f"Cache hit for URL: {url}, formats={formats}")
                 return cached
 
-        # Either cache miss or force_fetch is True -> scrape from Firecrawl
+        # Fetch fresh results from Firecrawl
         logger.info(f"Scraping fresh content for URL: {url}, formats={formats}")
         try:
             result = firecrawl_client.scrape_url(url=url, params={"formats": formats})
-            # Store in cache
+            # Store result in cache
             cache.store_result(url, formats, result)
             return result
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
                 logger.error("Firecrawl API key authentication failed")
                 raise HTTPException(
-                    status_code=503,  # Service Unavailable
+                    status_code=503,
                     detail={
                         "error": "authentication_failed",
                         "message": "Firecrawl authentication failed. Please check API key configuration.",
@@ -85,7 +82,7 @@ def scrape(
             else:
                 logger.exception(f"HTTP error during scraping: {str(e)}")
                 raise HTTPException(
-                    status_code=502,  # Bad Gateway
+                    status_code=502,
                     detail={
                         "error": "scraping_failed",
                         "message": f"Error scraping URL: {str(e)}",
@@ -100,7 +97,6 @@ def scrape(
                     "message": f"Unexpected error: {str(e)}",
                 },
             )
-
     except Exception as e:
         logger.exception("Error in scrape endpoint")
         if isinstance(e, HTTPException):
@@ -118,79 +114,201 @@ def scrape(
 def batch_scrape(request: BatchScrapeRequest):
     """
     Batch scrape multiple URLs using Firecrawl.
-
-    - **urls**: A list of URLs to scrape.
-    - **formats**: A list of formats to return (default is ["markdown"]).
-    - **force_fetch**: If true, bypass cache and fetch fresh data for each URL.
+    Automatically filters out unsupported URLs and continues with supported ones.
     """
     try:
-        # We'll accumulate results in the same shape Firecrawl returns:
-        # { 'success': True, 'status': 'completed', 'data': [...], ... }
-        # But we need to handle each URL individually in the cache.
-
-        # If not force_fetch, try to see which URLs are in the cache
         if not request.force_fetch:
+            # Handle cached results as before...
             all_cached = True
             results_data = []
-
-            # We'll keep track of which URLs we still need to fetch from Firecrawl
             urls_to_fetch = []
             for url in request.urls:
                 cached = cache.get_cached_result(url, request.formats or ["markdown"])
                 if cached is not None:
-                    # We have it in the cache
                     results_data.append(cached)
                 else:
-                    # We'll need to fetch this
                     all_cached = False
                     urls_to_fetch.append(url)
 
-            if len(urls_to_fetch) > 0:
-                # We do a batch scrape for those not found in cache
-                logger.info(f"Scraping fresh content for these URLs: {urls_to_fetch}")
-                batch_result = firecrawl_client.batch_scrape_urls(
-                    urls_to_fetch, {"formats": request.formats}
-                )
-
-                # Firecrawl returns 'data': [ {...}, {...}, ... ] in batch_result
-                # We'll store each item in the cache
-                if batch_result.get("data"):
-                    for idx, url in enumerate(urls_to_fetch):
-                        cache.store_result(
-                            url, request.formats, batch_result["data"][idx]
-                        )
-                        results_data.append(batch_result["data"][idx])
-
-                # Merge any top-level keys Firecrawl normally returns
-                # This is a simple approach: we'll preserve 'status', 'success', etc.
-                # The only difference is our combined results_data
-                combined_result = {
-                    **batch_result,
-                    "data": results_data,
-                }
-                return combined_result
+            if urls_to_fetch:
+                try:
+                    batch_result = firecrawl_client.batch_scrape_urls(
+                        urls_to_fetch, {"formats": request.formats}
+                    )
+                    if batch_result.get("data"):
+                        for idx, url in enumerate(urls_to_fetch):
+                            cache.store_result(
+                                url, request.formats, batch_result["data"][idx]
+                            )
+                            results_data.append(batch_result["data"][idx])
+                    return {
+                        "success": True,
+                        "status": "completed",
+                        "total": len(request.urls),
+                        "completed": len(results_data),
+                        "data": results_data,
+                    }
+                except requests.exceptions.HTTPError as e:
+                    # If we get an error for unsupported URLs, return what we have from cache
+                    if hasattr(e, "response") and e.response.status_code == 400:
+                        return {
+                            "success": True,
+                            "status": "partial",
+                            "total": len(request.urls),
+                            "completed": len(results_data),
+                            "data": results_data,
+                            "warning": "Some URLs could not be fetched as they are not supported",
+                            "skipped_urls": urls_to_fetch,
+                        }
+                    raise
             else:
-                # If we had everything in the cache, build a Firecrawl-like response
+                # All results were cached
                 return {
                     "success": True,
                     "status": "completed",
                     "total": len(request.urls),
-                    "completed": len(request.urls),
+                    "completed": len(results_data),
                     "data": results_data,
                 }
         else:
-            # force_fetch = True -> bypass cache altogether
             logger.info("Batch scraping with force_fetch=True (bypassing cache).")
-            batch_result = firecrawl_client.batch_scrape_urls(
-                request.urls, {"formats": request.formats}
-            )
 
-            # Store each item from Firecrawl in the cache
-            if batch_result.get("data"):
-                for idx, url in enumerate(request.urls):
-                    cache.store_result(url, request.formats, batch_result["data"][idx])
+            def get_supported_urls(urls, error_response):
+                """Helper function to filter supported URLs based on error response"""
+                unsupported_indices = set()
+                if isinstance(error_response, list):
+                    for error in error_response:
+                        if (
+                            "path" in error
+                            and isinstance(error["path"], list)
+                            and len(error["path"]) >= 2
+                        ):
+                            try:
+                                unsupported_indices.add(int(error["path"][1]))
+                            except (ValueError, TypeError):
+                                continue
 
-            return batch_result
-    except Exception:
+                supported_urls = []
+                unsupported_urls = []
+                for idx, url in enumerate(urls):
+                    if idx in unsupported_indices:
+                        unsupported_urls.append(url)
+                    else:
+                        supported_urls.append(url)
+
+                return supported_urls, unsupported_urls
+
+            try:
+                # First attempt with all URLs
+                batch_result = firecrawl_client.batch_scrape_urls(
+                    request.urls, {"formats": request.formats}
+                )
+                return batch_result
+
+            except requests.exceptions.HTTPError as e:
+                if not hasattr(e, "response") or e.response.status_code != 400:
+                    return {
+                        "success": True,
+                        "status": "error",
+                        "total": len(request.urls),
+                        "completed": 0,
+                        "data": [],
+                        "warning": f"Error during batch scrape: {str(e)}",
+                        "skipped_urls": request.urls,
+                    }
+
+                try:
+                    error_response = e.response.json()
+                    supported_urls, unsupported_urls = get_supported_urls(
+                        request.urls, error_response
+                    )
+
+                    logger.info(
+                        f"Found {len(unsupported_urls)} unsupported URLs: {unsupported_urls}"
+                    )
+                    logger.info(
+                        f"Retrying with {len(supported_urls)} supported URLs: {supported_urls}"
+                    )
+
+                    if not supported_urls:
+                        return {
+                            "success": True,
+                            "status": "completed",
+                            "total": len(request.urls),
+                            "completed": 0,
+                            "data": [],
+                            "warning": "No supported URLs to process",
+                            "skipped_urls": unsupported_urls,
+                        }
+
+                    # Retry with only supported URLs
+                    batch_result = firecrawl_client.batch_scrape_urls(
+                        supported_urls, {"formats": request.formats}
+                    )
+
+                    # If we get here, the retry was successful
+                    return {
+                        **batch_result,
+                        "warning": "Some URLs were skipped as they are not supported",
+                        "skipped_urls": unsupported_urls,
+                    }
+
+                except requests.exceptions.HTTPError as retry_error:
+                    # If we get another 400 error, we need to filter again
+                    if (
+                        hasattr(retry_error, "response")
+                        and retry_error.response.status_code == 400
+                    ):
+                        try:
+                            retry_error_response = retry_error.response.json()
+                            remaining_supported, newly_unsupported = get_supported_urls(
+                                supported_urls, retry_error_response
+                            )
+
+                            if remaining_supported:
+                                final_result = firecrawl_client.batch_scrape_urls(
+                                    remaining_supported, {"formats": request.formats}
+                                )
+                                return {
+                                    **final_result,
+                                    "warning": "Some URLs were skipped as they are not supported",
+                                    "skipped_urls": unsupported_urls
+                                    + newly_unsupported,
+                                }
+
+                        except Exception:
+                            pass
+
+                    return {
+                        "success": True,
+                        "status": "error",
+                        "total": len(request.urls),
+                        "completed": 0,
+                        "data": [],
+                        "warning": f"Error processing supported URLs: {str(retry_error)}",
+                        "skipped_urls": request.urls,
+                    }
+
+                except Exception as e:
+                    logger.exception("Error processing URLs")
+                    return {
+                        "success": True,
+                        "status": "error",
+                        "total": len(request.urls),
+                        "completed": 0,
+                        "data": [],
+                        "warning": f"Error processing URLs: {str(e)}",
+                        "skipped_urls": request.urls,
+                    }
+
+    except Exception as e:
         logger.exception("Error batch scraping URLs")
-        raise HTTPException(status_code=500, detail="Error batch scraping URLs")
+        return {
+            "success": True,
+            "status": "error",
+            "total": len(request.urls),
+            "completed": 0,
+            "data": [],
+            "warning": f"Unexpected error: {str(e)}",
+            "skipped_urls": request.urls,
+        }
