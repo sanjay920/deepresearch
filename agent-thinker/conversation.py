@@ -42,3 +42,7 @@ class Conversation:
                 formatted.append(f"assistant: {content}")
 
         return "\n\n".join(formatted)
+
+    def get_history_excluding_scratchpad_msgs(self):
+        # For now, we return the full history so past tool calls remain visible.
+        return self.history
