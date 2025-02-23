@@ -2,36 +2,48 @@
 import os
 import json
 import click
+import logging
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.layout import Layout
 from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.live import Live
+from rich.logging import RichHandler
 from datetime import datetime
 import tiktoken
 
 from conversation import Conversation
 from llm_client import stream_message
 from tool_dispatcher import dispatch_tool_call
+from orchestrator import Orchestrator, Task
+from utils import setup_logging
+
+# Setup console for rich output
+console = Console()
+
+# Setup logging with RichHandler for better formatting
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(rich_tracebacks=True)],
+)
+logger = logging.getLogger("research_bot")
 
 
 def build_tools_panel_from_list(calls_list):
     if not calls_list:
         return Panel("No tool calls", title="Tool Calls")
     text = "\n".join(
-        [f"{i+1}. {call.function.name}" for i, call in enumerate(calls_list)]
+        [f"{i+1}. {call['function']['name']}" for i, call in enumerate(calls_list)]
     )
     return Panel(text, title="Tool Calls")
 
 
 def build_scratchpad_panel(scratchpad_state):
-    """
-    Builds a Rich Panel showing the current contents of the scratchpad.
-    """
     if not scratchpad_state:
         return Panel("No scratchpad entries", title="Scratchpad")
-
     lines = []
     for eid, note in scratchpad_state.items():
         title = note["title"]
@@ -42,9 +54,6 @@ def build_scratchpad_panel(scratchpad_state):
 
 
 def generate_mla_citation(tool_name, result):
-    """
-    Given the tool name and its result dictionary, generate an MLA-style citation.
-    """
     citations = []
     if tool_name == "google_search":
         items = result.get("items", [])
@@ -52,7 +61,6 @@ def generate_mla_citation(tool_name, result):
             title = item.get("title", "No title")
             display = item.get("displayLink", "Unknown source")
             link = item.get("link", "No URL")
-            # Simple MLA citation format: "Title." DisplayLink, URL.
             citation = f'"{title}." {display}, {link}.'
             citations.append(citation)
     elif tool_name == "scrape_urls":
@@ -66,13 +74,10 @@ def generate_mla_citation(tool_name, result):
     return "\n".join(citations)
 
 
-# Global scratchpad state (accumulates citations from tool calls)
 scratchpad_state = {}
 
 
 class ToolCallAggregator:
-    """A simple aggregator for tool calls emitted in streaming responses."""
-
     def __init__(self):
         self.final_tool_calls = {}
 
@@ -80,93 +85,50 @@ class ToolCallAggregator:
         self.final_tool_calls = {}
 
     def process_delta(self, tool_calls):
-        """Process tool call deltas from the streaming response.
-        Args:
-            tool_calls: A list of ChoiceDeltaToolCall objects or a single ChoiceDeltaToolCall
-        """
         if not tool_calls:
             return
         calls = tool_calls if isinstance(tool_calls, list) else [tool_calls]
         for tool_call in calls:
             index = tool_call.index
             if index not in self.final_tool_calls:
-                self.final_tool_calls[index] = tool_call
-                if not hasattr(self.final_tool_calls[index].function, "arguments"):
-                    self.final_tool_calls[index].function.arguments = ""
-            if hasattr(tool_call.function, "arguments"):
-                current_args = self.final_tool_calls[index].function.arguments or ""
-                new_args = tool_call.function.arguments or ""
-                self.final_tool_calls[index].function.arguments = (
-                    current_args + new_args
-                )
+                self.final_tool_calls[index] = {
+                    "index": index,
+                    "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                    "id": tool_call.id if tool_call.id else None,
+                }
+            if tool_call.id and self.final_tool_calls[index]["id"] is None:
+                self.final_tool_calls[index]["id"] = tool_call.id
+            if tool_call.function:
+                if tool_call.function.name:
+                    self.final_tool_calls[index]["function"][
+                        "name"
+                    ] = tool_call.function.name
+                if tool_call.function.arguments:
+                    self.final_tool_calls[index]["function"][
+                        "arguments"
+                    ] += tool_call.function.arguments
 
     def get_all_calls(self):
-        """Returns the list of complete tool calls."""
         return list(self.final_tool_calls.values())
 
     def finalize(self):
         pass
 
-    def chunk_tool_output(self, content: str, chunk_size: int = 2000) -> str:
-        enc = tiktoken.get_encoding("cl100k_base")
-        sections = []
-        current_section = []
-        for line in content.splitlines():
-            if (
-                line.startswith("#")
-                or line.startswith("[")
-                or line.startswith("!")
-                or len("".join(current_section)) > 500
-            ):
-                if current_section:
-                    sections.append("\n".join(current_section))
-                    current_section = []
-            current_section.append(line)
-        if current_section:
-            sections.append("\n".join(current_section))
-        chunks = []
-        current_chunk = []
-        current_chunk_tokens = 0
-        for section in sections:
-            section_tokens = enc.encode(section)
-            section_token_count = len(section_tokens)
-            if section_token_count > chunk_size:
-                words = section.split()
-                temp_chunk = []
-                temp_tokens = 0
-                for word in words:
-                    word_tokens = len(enc.encode(word + " "))
-                    if temp_tokens + word_tokens > chunk_size:
-                        if temp_chunk:
-                            chunks.append(" ".join(temp_chunk))
-                        temp_chunk = [word]
-                        temp_tokens = word_tokens
-                    else:
-                        temp_chunk.append(word)
-                        temp_tokens += word_tokens
-                if temp_chunk:
-                    chunks.append(" ".join(temp_chunk))
-            elif current_chunk_tokens + section_token_count > chunk_size:
-                chunks.append("\n".join(current_chunk))
-                current_chunk = [section]
-                current_chunk_tokens = section_token_count
-            else:
-                current_chunk.append(section)
-                current_chunk_tokens += section_token_count
-        if current_chunk:
-            chunks.append("\n".join(current_chunk))
-        chunked_content = ""
-        for i, chunk in enumerate(chunks, 1):
-            chunked_content += f"\n<start chunk {i}>\n{chunk}\n<end chunk {i}>\n"
-        return chunked_content
 
-
-console = Console()
 conversation = Conversation()
 
 
 @click.command()
-def chat_cli():
+@click.option("--debug", is_flag=True, help="Enable debug mode for detailed logging")
+def chat_cli(debug):
+    """CLI for the research bot."""
+    # Adjust logging level based on debug flag
+    if debug:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
+
     system_message = {
         "role": "system",
         "content": [
@@ -185,6 +147,7 @@ def chat_cli():
     }
     conversation.add_message(system_message)
     tool_aggregator = ToolCallAggregator()
+    orchestrator = Orchestrator()
 
     while True:
         user_input = console.input("[bold yellow]You:[/] ")
@@ -224,7 +187,6 @@ def chat_cli():
             # (A) First LLM call WITH scratchpad tools
             stream = stream_message(
                 conversation.get_history(),
-                # (Assuming stream_message ignores use_scratchpad if not implemented)
             )
 
             with Live(
@@ -240,7 +202,7 @@ def chat_cli():
                         current_calls = tool_aggregator.get_all_calls()
                         if current_calls:
                             latest_call = current_calls[-1]
-                            tool_name = latest_call.function.name
+                            tool_name = latest_call["function"]["name"]
                             spinner_text = f"Tool call: [cyan]{tool_name}[/]"
                             layout["spinner"].update(
                                 Spinner("dots", text=spinner_text, style="dim")
@@ -254,6 +216,7 @@ def chat_cli():
                     live.update(layout)
 
             tool_aggregator.finalize()
+            final_response = full_response
             layout["spinner"].update("")
             layout["tools"].update(
                 build_tools_panel_from_list(tool_aggregator.get_all_calls())
@@ -262,73 +225,156 @@ def chat_cli():
             tool_calls = tool_aggregator.get_all_calls()
 
             if tool_calls:
-                # Add the assistant message that triggered these tool calls.
-                conversation.add_message(
-                    {
-                        "role": "assistant",
-                        "content": [],
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                },
-                            }
-                            for tc in tool_calls
-                        ],
-                    }
-                )
-                console.print("[bold cyan]Processing tool calls...[/]")
+                # Use logger for debug messages and Rich for user-friendly updates
+                if debug:
+                    console.print("[bold cyan]Processing tool calls...[/]")
+                else:
+                    spinner_text = "Processing tool calls..."
+                    layout["spinner"].update(
+                        Spinner("dots", text=spinner_text, style="dim")
+                    )
+                    live.update(layout)
+
+                # Add assistant message with tool_calls
+                assistant_message = {
+                    "role": "assistant",
+                    "content": [],
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["function"]["name"],
+                                "arguments": tc["function"]["arguments"],
+                            },
+                        }
+                        for tc in tool_calls
+                    ],
+                }
+                conversation.add_message(assistant_message)
+
                 for tc in tool_calls:
                     try:
-                        raw_args = tc.function.arguments
-                        console.print(f"[dim]Raw arguments: {raw_args}[/]")
+                        raw_args = tc["function"]["arguments"]
+                        logger.debug(f"Raw arguments: {raw_args}")
                         if not raw_args or raw_args.isspace():
-                            console.print(
-                                "[yellow]Skipping empty-argument tool call[/]"
-                            )
+                            logger.warning("Skipping empty-argument tool call")
                             continue
                         args_obj = json.loads(raw_args)
                         result = dispatch_tool_call(
                             {
-                                "id": tc.id,
+                                "id": tc["id"],
                                 "function": {
-                                    "name": tc.function.name,
+                                    "name": tc["function"]["name"],
                                     "arguments": args_obj,
                                 },
                             },
                             conversation=conversation,
+                            scratchpad_state=scratchpad_state,
                         )
-                        console.print(f"[dim]Tool result: {result}[/]")
+                        logger.debug(f"Tool result: {result}")
 
-                        # If the tool call is a search or scrape, generate an MLA citation and update the scratchpad.
-                        if tc.function.name in ("scrape_urls", "google_search"):
+                        if tc["function"]["name"] in ("scrape_urls", "google_search"):
                             citation_text = generate_mla_citation(
-                                tc.function.name, result
+                                tc["function"]["name"], result
                             )
-                            scratchpad_state[tc.id] = {
-                                "title": tc.function.name,
+                            scratchpad_state[tc["id"]] = {
+                                "title": tc["function"]["name"],
                                 "content": citation_text,
                             }
                             result = f"{result}\n\nMLA Citation(s):\n{citation_text}"
 
-                        conversation.add_message(
-                            {
-                                "role": "tool",
-                                "content": [{"type": "text", "text": str(result)}],
-                                "tool_call_id": tc.id,
-                            }
-                        )
-                    except Exception as ex:
-                        console.print(f"[red]Tool call error: {ex}[/]")
+                        # Add tool message
+                        tool_message = {
+                            "role": "tool",
+                            "content": [{"type": "text", "text": str(result)}],
+                            "tool_call_id": tc["id"],
+                        }
+                        conversation.add_message(tool_message)
 
-                # (B) Second LLM call WITHOUT scratchpad tools.
-                console.print(
-                    "[magenta]\nNow calling LLM WITHOUT scratchpad tools...[/]"
+                        # Add tasks to orchestrator based on tool results
+                        if tc["function"]["name"] == "google_search":
+                            task_id = f"retrieval_{tc['id']}"
+                            task = Task(
+                                task_id=task_id,
+                                task_type="retrieval",
+                                params={"query": args_obj["q"]},
+                            )
+                            orchestrator.add_task(task)
+                        elif tc["function"]["name"] == "scrape_urls":
+                            for url in args_obj["urls"]:
+                                task_id = f"retrieval_url_{tc['id']}_{url}"
+                                task = Task(
+                                    task_id=task_id,
+                                    task_type="retrieval",
+                                    params={"url": url},
+                                )
+                                orchestrator.add_task(task)
+                    except Exception as ex:
+                        logger.error(f"Tool call error: {ex}")
+
+                # Execute tasks using orchestrator
+                orchestrator.execute_tasks()
+                task_results = orchestrator.get_task_results()
+
+                # Add synthesis task based on retrieval results
+                for task_id, result in task_results.items():
+                    if task_id.startswith("retrieval_"):
+                        synthesis_task = Task(
+                            task_id=f"synthesis_{task_id}",
+                            task_type="synthesis",
+                            params={"query": user_input, "data": str(result)},
+                            dependencies=[task_id],
+                        )
+                        orchestrator.add_task(synthesis_task)
+
+                # Execute synthesis tasks
+                orchestrator.execute_tasks()
+                synthesis_results = orchestrator.get_task_results()
+
+                # Add validation task for synthesis results
+                for task_id, result in synthesis_results.items():
+                    if task_id.startswith("synthesis_"):
+                        validation_task = Task(
+                            task_id=f"validation_{task_id}",
+                            task_type="validation",
+                            params={"summary": result, "sources": str(task_results)},
+                            dependencies=[task_id],
+                        )
+                        orchestrator.add_task(validation_task)
+
+                # Execute validation tasks
+                orchestrator.execute_tasks()
+                final_results = orchestrator.get_task_results()
+
+                # Use final validated results for response
+                final_response = "\n".join(
+                    [
+                        result
+                        for task_id, result in final_results.items()
+                        if task_id.startswith("validation_")
+                    ]
                 )
+                if not final_response:
+                    final_response = full_response
+
+                if debug:
+                    console.print(
+                        "[magenta]\nNow calling LLM WITHOUT scratchpad tools...[/]"
+                    )
+                else:
+                    spinner_text = "Generating final response..."
+                    layout["spinner"].update(
+                        Spinner("dots", text=spinner_text, style="dim")
+                    )
+                    live.update(layout)
+
                 filtered_history = conversation.get_history_excluding_scratchpad_msgs()
+
+                # Log the conversation history for debugging
+                logger.debug(
+                    f"Conversation history for second LLM call: {filtered_history}"
+                )
 
                 second_aggregator = ToolCallAggregator()
                 second_response = ""
@@ -367,12 +413,11 @@ def chat_cli():
                 )
                 layout["scratchpad"].update(build_scratchpad_panel(scratchpad_state))
                 final_text = (
-                    second_response if second_response.strip() else full_response
+                    second_response if second_response.strip() else final_response
                 )
             else:
-                final_text = full_response
+                final_text = final_response
 
-            # Final non-transient rendering
             console.print("\n[bold blue]Final Rendering with Scratchpad:[/]")
             final_layout = Layout()
             final_layout.split_column(
@@ -402,6 +447,7 @@ def chat_cli():
             )
 
         except Exception as e:
+            logger.error(f"Error: {e}")
             console.print(f"\n[bold red]Error:[/] {e}\n")
 
 
