@@ -5,11 +5,7 @@ import click
 import logging
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.layout import Layout
-from rich.panel import Panel
-from rich.spinner import Spinner
-from rich.live import Live
-from rich.logging import RichHandler
+from threading import Thread
 from datetime import datetime
 import tiktoken
 
@@ -19,62 +15,7 @@ from tool_dispatcher import dispatch_tool_call
 from orchestrator import Orchestrator, Task
 from utils import setup_logging
 
-# Setup console for rich output
 console = Console()
-
-# Setup logging with RichHandler for better formatting
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=True)],
-)
-logger = logging.getLogger("research_bot")
-
-
-def build_tools_panel_from_list(calls_list):
-    if not calls_list:
-        return Panel("No tool calls", title="Tool Calls")
-    text = "\n".join(
-        [f"{i+1}. {call['function']['name']}" for i, call in enumerate(calls_list)]
-    )
-    return Panel(text, title="Tool Calls")
-
-
-def build_scratchpad_panel(scratchpad_state):
-    if not scratchpad_state:
-        return Panel("No scratchpad entries", title="Scratchpad")
-    lines = []
-    for eid, note in scratchpad_state.items():
-        title = note["title"]
-        content = note["content"]
-        lines.append(f"[bold]ID {eid}[/bold]: {title}\n{content}\n")
-    panel_text = "\n".join(lines)
-    return Panel(panel_text, title="Scratchpad")
-
-
-def generate_mla_citation(tool_name, result):
-    citations = []
-    if tool_name == "google_search":
-        items = result.get("items", [])
-        for item in items:
-            title = item.get("title", "No title")
-            display = item.get("displayLink", "Unknown source")
-            link = item.get("link", "No URL")
-            citation = f'"{title}." {display}, {link}.'
-            citations.append(citation)
-    elif tool_name == "scrape_urls":
-        data = result.get("data", [])
-        for entry in data:
-            meta = entry.get("metadata", {})
-            url = meta.get("url", "No URL")
-            title = meta.get("title", "No title")
-            citation = f'"{title}." {url}.'
-            citations.append(citation)
-    return "\n".join(citations)
-
-
-scratchpad_state = {}
 
 
 class ToolCallAggregator:
@@ -82,9 +23,11 @@ class ToolCallAggregator:
         self.final_tool_calls = {}
 
     def reset(self):
+        """Reset the aggregator for a new response."""
         self.final_tool_calls = {}
 
     def process_delta(self, tool_calls):
+        """Process a delta chunk of tool calls."""
         if not tool_calls:
             return
         calls = tool_calls if isinstance(tool_calls, list) else [tool_calls]
@@ -110,24 +53,20 @@ class ToolCallAggregator:
                     ] += tool_call.function.arguments
 
     def get_all_calls(self):
+        """Return all aggregated tool calls."""
         return list(self.final_tool_calls.values())
 
     def finalize(self):
+        """Finalize the aggregation process (currently a no-op)."""
         pass
-
-
-conversation = Conversation()
 
 
 @click.command()
 @click.option("--debug", is_flag=True, help="Enable debug mode for detailed logging")
-def chat_cli(debug):
-    """CLI for the research bot."""
-    # Adjust logging level based on debug flag
-    if debug:
-        logger.setLevel(logging.DEBUG)
-    else:
-        logger.setLevel(logging.INFO)
+@click.option("--show-validation", is_flag=True, help="Show detailed validation report")
+def chat_cli(debug: bool, show_validation: bool):
+    """CLI interface for interacting with the assistant and generating reports."""
+    setup_logging(verbose=debug)
 
     system_message = {
         "role": "system",
@@ -135,19 +74,29 @@ def chat_cli(debug):
             {
                 "type": "text",
                 "text": (
-                    "You are an assistant wearing your 'agent' hat. This means you can:\n"
-                    "- Interact with tools (including scratchpad tools),\n"
-                    "- Reply directly to the user.\n\n"
-                    "When facing a complex/multi-step request, you must switch to your 'thinker' persona by calling "
-                    "the 'switch_personas' function with argument \"thinker\". Then once enough details are gathered, switch back to 'agent' and provide a final answer.\n\n"
-                    f"Today's date is {datetime.now().strftime('%B %d, %Y %H:%M:%S')}."
+                    "You are an assistant wearing your 'agent' hat. Your goal is to fully answer the user's query by gathering and processing data. You can:\n"
+                    "- Use 'google_search' to find relevant sources.\n"
+                    "- Use 'scrape_urls' to fetch full content from specific websites when search snippets aren’t enough.\n"
+                    "- Iterate by adding more searches or scrapes if initial data is incomplete.\n"
+                    "- Use scratchpad tools to store intermediate data if needed.\n\n"
+                    "For queries requiring specific details (e.g., lists, ages), follow this flow:\n"
+                    "1. Start with a broad search to identify sources.\n"
+                    "2. Scrape relevant websites to get detailed data.\n"
+                    "3. If data is missing, queue more searches or scrapes to fill gaps.\n"
+                    "4. Synthesize and validate the final answer with all collected data.\n\n"
+                    "Don’t suggest users visit links—fetch the data yourself and provide a complete answer. "
+                    "For complex tasks, call 'switch_personas' with 'thinker' to plan multi-step processes. "
+                    f"Today’s date is {datetime.now().strftime('%B %d, %Y')}. Calculate ages based on birth dates relative to this date."
                 ),
             }
         ],
     }
+
+    conversation = Conversation()
     conversation.add_message(system_message)
     tool_aggregator = ToolCallAggregator()
     orchestrator = Orchestrator()
+    scratchpad_state = {}  # Initialize persistent scratchpad state
 
     while True:
         user_input = console.input("[bold yellow]You:[/] ")
@@ -156,86 +105,29 @@ def chat_cli(debug):
             break
 
         conversation.add_message(
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": user_input}],
-            }
+            {"role": "user", "content": [{"type": "text", "text": user_input}]}
         )
 
-        # Build initial layout
-        layout = Layout()
-        layout.split_column(
-            Layout(name="spinner", size=1), Layout(name="main", ratio=1)
-        )
-        layout["main"].split_row(
-            Layout(name="content", ratio=1),
-            Layout(name="tools", size=35),
-            Layout(name="scratchpad", size=35),
-        )
-
-        spinner_text = "Thinking..."
-        spinner = Spinner("dots", text=spinner_text, style="dim")
-        layout["spinner"].update(spinner)
-        layout["content"].update(Markdown(""))
-        layout["tools"].update(build_tools_panel_from_list([]))
-        layout["scratchpad"].update(build_scratchpad_panel(scratchpad_state))
+        console.print("[dim]Currently processing: Handling your request...[/]")
 
         try:
-            full_response = ""
-            tool_aggregator.reset()
+            while True:
+                full_response = ""
+                tool_aggregator.reset()
 
-            # (A) First LLM call WITH scratchpad tools
-            stream = stream_message(
-                conversation.get_history(),
-            )
-
-            with Live(
-                layout, refresh_per_second=10, console=console, transient=True
-            ) as live:
+                stream = stream_message(conversation.get_history())
                 for chunk in stream:
                     if chunk.choices[0].delta.content:
-                        content_piece = chunk.choices[0].delta.content
-                        full_response += content_piece
-                        layout["content"].update(Markdown(full_response))
+                        full_response += chunk.choices[0].delta.content
                     if chunk.choices[0].delta.tool_calls:
                         tool_aggregator.process_delta(chunk.choices[0].delta.tool_calls)
-                        current_calls = tool_aggregator.get_all_calls()
-                        if current_calls:
-                            latest_call = current_calls[-1]
-                            tool_name = latest_call["function"]["name"]
-                            spinner_text = f"Tool call: [cyan]{tool_name}[/]"
-                            layout["spinner"].update(
-                                Spinner("dots", text=spinner_text, style="dim")
-                            )
-                            layout["tools"].update(
-                                build_tools_panel_from_list(current_calls)
-                            )
-                    layout["scratchpad"].update(
-                        build_scratchpad_panel(scratchpad_state)
-                    )
-                    live.update(layout)
+                tool_calls = tool_aggregator.get_all_calls()
 
-            tool_aggregator.finalize()
-            final_response = full_response
-            layout["spinner"].update("")
-            layout["tools"].update(
-                build_tools_panel_from_list(tool_aggregator.get_all_calls())
-            )
-            layout["scratchpad"].update(build_scratchpad_panel(scratchpad_state))
-            tool_calls = tool_aggregator.get_all_calls()
+                if not tool_calls:
+                    console.print("\n[bold blue]Final Answer:[/]")
+                    console.print(Markdown(full_response))
+                    break
 
-            if tool_calls:
-                # Use logger for debug messages and Rich for user-friendly updates
-                if debug:
-                    console.print("[bold cyan]Processing tool calls...[/]")
-                else:
-                    spinner_text = "Processing tool calls..."
-                    layout["spinner"].update(
-                        Spinner("dots", text=spinner_text, style="dim")
-                    )
-                    live.update(layout)
-
-                # Add assistant message with tool_calls
                 assistant_message = {
                     "role": "assistant",
                     "content": [],
@@ -256,11 +148,12 @@ def chat_cli(debug):
                 for tc in tool_calls:
                     try:
                         raw_args = tc["function"]["arguments"]
-                        logger.debug(f"Raw arguments: {raw_args}")
                         if not raw_args or raw_args.isspace():
-                            logger.warning("Skipping empty-argument tool call")
                             continue
                         args_obj = json.loads(raw_args)
+                        console.print(
+                            f"[dim]Currently processing: {tc['function']['name']} call[/]"
+                        )
                         result = dispatch_tool_call(
                             {
                                 "id": tc["id"],
@@ -272,19 +165,8 @@ def chat_cli(debug):
                             conversation=conversation,
                             scratchpad_state=scratchpad_state,
                         )
-                        logger.debug(f"Tool result: {result}")
-
-                        if tc["function"]["name"] in ("scrape_urls", "google_search"):
-                            citation_text = generate_mla_citation(
-                                tc["function"]["name"], result
-                            )
-                            scratchpad_state[tc["id"]] = {
-                                "title": tc["function"]["name"],
-                                "content": citation_text,
-                            }
-                            result = f"{result}\n\nMLA Citation(s):\n{citation_text}"
-
-                        # Add tool message
+                        if result is None:
+                            result = "Tool call returned no result."
                         tool_message = {
                             "role": "tool",
                             "content": [{"type": "text", "text": str(result)}],
@@ -292,8 +174,50 @@ def chat_cli(debug):
                         }
                         conversation.add_message(tool_message)
 
-                        # Add tasks to orchestrator based on tool results
-                        if tc["function"]["name"] == "google_search":
+                        if tc["function"]["name"] == "switch_personas":
+                            thinker_response = json.loads(result)
+                            if "error" in thinker_response:
+                                console.print(
+                                    f"[bold red]Thinker Error:[/] {thinker_response['error']}"
+                                )
+                                break
+                            if thinker_response["action"] == "plan":
+                                console.print(
+                                    "[dim]Currently processing: Executing thinker’s plan[/]"
+                                )
+                                for step in thinker_response.get("steps", []):
+                                    if step["tool"] == "google_search":
+                                        task_id = f"retrieval_{tc['id']}_{step['parameters']['q']}"
+                                        task = Task(
+                                            task_id=task_id,
+                                            task_type="retrieval",
+                                            params={"query": step["parameters"]["q"]},
+                                        )
+                                        orchestrator.add_task(task)
+                                    elif step["tool"] == "scrape_urls":
+                                        for url in step["parameters"]["urls"]:
+                                            task_id = f"retrieval_url_{tc['id']}_{url}"
+                                            task = Task(
+                                                task_id=task_id,
+                                                task_type="retrieval",
+                                                params={"url": url},
+                                            )
+                                            orchestrator.add_task(task)
+                            elif thinker_response["action"] == "questions":
+                                console.print("\n[bold yellow]Questions for you:[/]")
+                                console.print(Markdown(thinker_response["text"]))
+                                user_response = console.input(
+                                    "[bold yellow]Your response:[/] "
+                                )
+                                conversation.add_message(
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {"type": "text", "text": user_response}
+                                        ],
+                                    }
+                                )
+                        elif tc["function"]["name"] == "google_search":
                             task_id = f"retrieval_{tc['id']}"
                             task = Task(
                                 task_id=task_id,
@@ -311,144 +235,101 @@ def chat_cli(debug):
                                 )
                                 orchestrator.add_task(task)
                     except Exception as ex:
-                        logger.error(f"Tool call error: {ex}")
+                        logging.error(f"Tool call error: {ex}")
+                        console.print(f"[bold red]Error in tool call:[/] {str(ex)}")
+                        conversation.add_message(
+                            {
+                                "role": "tool",
+                                "content": [
+                                    {"type": "text", "text": f"Error: {str(ex)}"}
+                                ],
+                                "tool_call_id": tc["id"],
+                            }
+                        )
 
-                # Execute tasks using orchestrator
-                orchestrator.execute_tasks()
-                task_results = orchestrator.get_task_results()
-
-                # Add synthesis task based on retrieval results
-                for task_id, result in task_results.items():
-                    if task_id.startswith("retrieval_"):
+                if orchestrator.get_pending_tasks():
+                    retrieval_task_ids = [
+                        task.task_id
+                        for task in orchestrator.tasks.values()
+                        if task.task_type == "retrieval"
+                    ]
+                    for retrieval_task_id in retrieval_task_ids:
                         synthesis_task = Task(
-                            task_id=f"synthesis_{task_id}",
+                            task_id=f"synthesis_{retrieval_task_id}",
                             task_type="synthesis",
-                            params={"query": user_input, "data": str(result)},
-                            dependencies=[task_id],
+                            params={"query": user_input},
+                            dependencies=[retrieval_task_id],
                         )
                         orchestrator.add_task(synthesis_task)
-
-                # Execute synthesis tasks
-                orchestrator.execute_tasks()
-                synthesis_results = orchestrator.get_task_results()
-
-                # Add validation task for synthesis results
-                for task_id, result in synthesis_results.items():
-                    if task_id.startswith("synthesis_"):
                         validation_task = Task(
-                            task_id=f"validation_{task_id}",
+                            task_id=f"validation_{synthesis_task.task_id}",
                             task_type="validation",
-                            params={"summary": result, "sources": str(task_results)},
-                            dependencies=[task_id],
+                            params={"synthesis_task_id": synthesis_task.task_id},
+                            dependencies=[synthesis_task.task_id],
                         )
                         orchestrator.add_task(validation_task)
 
-                # Execute validation tasks
-                orchestrator.execute_tasks()
-                final_results = orchestrator.get_task_results()
-
-                # Use final validated results for response
-                final_response = "\n".join(
-                    [
-                        result
-                        for task_id, result in final_results.items()
-                        if task_id.startswith("validation_")
-                    ]
-                )
-                if not final_response:
-                    final_response = full_response
-
-                if debug:
                     console.print(
-                        "[magenta]\nNow calling LLM WITHOUT scratchpad tools...[/]"
+                        "[dim]Currently processing: Executing queued tasks[/]"
                     )
-                else:
-                    spinner_text = "Generating final response..."
-                    layout["spinner"].update(
-                        Spinner("dots", text=spinner_text, style="dim")
-                    )
-                    live.update(layout)
 
-                filtered_history = conversation.get_history_excluding_scratchpad_msgs()
-
-                # Log the conversation history for debugging
-                logger.debug(
-                    f"Conversation history for second LLM call: {filtered_history}"
-                )
-
-                second_aggregator = ToolCallAggregator()
-                second_response = ""
-                layout["spinner"].update(
-                    Spinner("dots", text="Second pass...", style="dim")
-                )
-                with Live(
-                    layout, refresh_per_second=10, console=console, transient=True
-                ) as live2:
-                    second_stream = stream_message(
-                        messages=filtered_history,
-                    )
-                    for chunk in second_stream:
-                        if chunk.choices[0].delta.content:
-                            piece = chunk.choices[0].delta.content
-                            second_response += piece
-                            layout["content"].update(Markdown(second_response))
-                        if chunk.choices[0].delta.tool_calls:
-                            second_aggregator.process_delta(
-                                chunk.choices[0].delta.tool_calls
-                            )
-                        layout["tools"].update(
-                            build_tools_panel_from_list(
-                                second_aggregator.get_all_calls()
-                            )
+                    def task_start_callback(task):
+                        console.print(
+                            f"[dim]Currently processing: {task.get_description()}[/]"
                         )
-                        layout["scratchpad"].update(
-                            build_scratchpad_panel(scratchpad_state)
+
+                    thread = Thread(
+                        target=orchestrator.execute_tasks,
+                        kwargs={"on_task_start": task_start_callback},
+                    )
+                    thread.start()
+                    thread.join()
+
+                    console.print("[dim]Task execution summary:[/]")
+                    for task_id, task in orchestrator.tasks.items():
+                        status = task.status
+                        description = task.get_description()
+                        console.print(f"{task_id}: {status} - {description}")
+
+                    synthesis_tasks = [
+                        task
+                        for task in orchestrator.tasks.values()
+                        if task.task_type == "synthesis" and task.status == "completed"
+                    ]
+                    if synthesis_tasks:
+                        final_synthesis = synthesis_tasks[-1].result
+                        try:
+                            synthesis_output = json.loads(final_synthesis)
+                            if synthesis_output["status"] == "complete":
+                                console.print("\n[bold blue]Final Answer:[/]")
+                                console.print(Markdown(synthesis_output["summary"]))
+                            else:
+                                console.print(
+                                    "\n[bold yellow]Partial Answer (Max Iterations Reached):[/]"
+                                )
+                                console.print(Markdown(synthesis_output["summary"]))
+                        except json.JSONDecodeError:
+                            console.print(
+                                "[bold red]Error:[/] Invalid synthesis output format."
+                            )
+                    else:
+                        console.print(
+                            "[bold red]Error:[/] No synthesis results available due to task failures."
                         )
-                        live2.update(layout)
-
-                second_aggregator.finalize()
-                layout["spinner"].update("")
-                layout["tools"].update(
-                    build_tools_panel_from_list(second_aggregator.get_all_calls())
-                )
-                layout["scratchpad"].update(build_scratchpad_panel(scratchpad_state))
-                final_text = (
-                    second_response if second_response.strip() else final_response
-                )
-            else:
-                final_text = final_response
-
-            console.print("\n[bold blue]Final Rendering with Scratchpad:[/]")
-            final_layout = Layout()
-            final_layout.split_column(
-                Layout(name="final_spinner", size=1),
-                Layout(name="final_main", ratio=1),
-            )
-            final_layout["final_main"].split_row(
-                Layout(name="final_content", ratio=1),
-                Layout(name="final_tools", size=35),
-                Layout(name="final_scratchpad", size=35),
-            )
-            final_layout["final_content"].update(Markdown(final_text))
-            final_layout["final_tools"].update(build_tools_panel_from_list(tool_calls))
-            final_layout["final_scratchpad"].update(
-                build_scratchpad_panel(scratchpad_state)
-            )
-            with Live(
-                final_layout, refresh_per_second=2, console=console, transient=False
-            ):
-                pass
-
-            conversation.add_message(
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": final_text}],
-                }
-            )
+                        failed_tasks = [
+                            task
+                            for task in orchestrator.tasks.values()
+                            if task.status == "failed"
+                        ]
+                        for task in failed_tasks:
+                            console.print(
+                                f"- Failed: {task.get_description()} - {task.result}"
+                            )
+                    break
 
         except Exception as e:
-            logger.error(f"Error: {e}")
-            console.print(f"\n[bold red]Error:[/] {e}\n")
+            console.print(f"\n[bold red]Error:[/] {str(e)}")
+            logging.error(f"CLI error: {e}")
 
 
 if __name__ == "__main__":
