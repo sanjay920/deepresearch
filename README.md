@@ -1,51 +1,66 @@
 # Deep Research
 
 ```mermaid
-flowchart TD
-    A[User inputs query] --> B[CLI]
-    B --> C[Orchestrator Service - port 8080]
-    C --> D{Is query complex?}
-    D -- No --> E[Call Gemini Service]
-    E --> F[Return simple answer]
-    D -- Yes --> G[Generate research plan]
-    G --> H[Execute plan steps]
-    H --> I{Tool needed?}
-    I -- Web scraping --> J[Call Firecrawl Service]
-    J --> H
-    I -- LLM query --> K[Call Gemini Service]
-    K --> H
-    I -- No --> L[Generate final response]
-    L --> M[Return to user]
+sequenceDiagram
+    participant U as User
+    participant CLI as cli.py
+    participant Convo as conversation.py
+    participant LLM as llm_client.py
+    participant TD as tool_dispatcher.py
+    participant O as orchestrator.py
+    participant R as retrieval.py
+    participant G as google_search.py
+    participant SU as scrape_urls.py
+    participant SP as switch_personas.py
+    participant S as synthesis.py
+    participant V as validation.py
 
-    %% Service ports
-    subgraph Services
-        direction LR
-        Orchestrator[Orchestrator - :8080]
-        Firecrawl[Firecrawl - :8084]
-        Gemini[Gemini - :8081]
-    end
-```
+    U->>CLI: "Create a 50-page research report on AI agent platforms..."
+    CLI->>Convo: Store user message in conversation
+    CLI->>LLM: Send conversation to LLM
+    Note over LLM: LLM decides to plan a complex multi-step task
+    LLM->>TD: Tool call: switch_personas(switch_to="thinker")
+    TD->>SP: switch_personas_call("thinker", conversation)
+    SP->>Convo: Retrieve conversation history
+    SP-->>TD: Returns JSON plan with steps (e.g., google_search, scrape_urls)
+    TD-->>LLM: Plan forwarded to LLM
+    LLM->>CLI: Assistant message with tool call result
+    CLI->>Convo: Store assistant message with plan
 
-## Quick Start
+    Note over CLI: CLI processes thinker’s plan steps
+    CLI->>O: Add retrieval tasks from plan (e.g., google_search "AI agent platforms 2025")
+    O->>R: Calls RetrievalAgent.search(query)
+    R->>G: google_search_call(query)
+    G-->>R: JSON search results
+    R-->>O: Return search results
+    CLI->>O: Add retrieval tasks (e.g., scrape_urls for Gartner pages)
+    O->>R: Calls RetrievalAgent.retrieve_webpages(urls)
+    R->>SU: scrape_urls_call(urls)
+    SU-->>R: Markdown content
+    R-->>O: Return scraped content
 
-1. Set environment variables:
+    Note over O: Orchestrator queues synthesis after retrievals
+    O->>S: Calls SynthesisAgent.synthesize(query, retrieval_results)
+    S->>LLM: Request summary generation
+    LLM-->>S: JSON with status, summary, and possibly additional_tasks
+    Note over S: If incomplete, suggest more retrievals
+    S-->>O: Return synthesis result (e.g., incomplete with new tasks)
+    O->>R: Add new retrieval tasks (e.g., scrape blogs, tweets)
+    R->>SU: scrape_urls_call(new_urls)
+    SU-->>R: New content
+    R-->>O: Return new data
 
-```bash
-export OPENAI_API_KEY=your_key_here
-export FIRECRAWL_API_KEY=your_key_here
-export GEMINI_API_KEY=your_key_here
-```
+    Note over O: Second synthesis iteration
+    O->>S: Synthesize again with all data
+    S->>LLM: Generate final 50-page report summary
+    LLM-->>S: JSON with status="complete", Markdown summary
+    S-->>O: Return complete synthesis
 
-2. Start services:
+    O->>V: Calls ValidationAgent.validate(summary)
+    V->>LLM: Verify citations in summary
+    LLM-->>V: Validation report
+    V-->>O: Return validation result
 
-```bash
-docker compose up -d
-```
-
-3. Run CLI:
-
-```bash
-cd cli
-pip install -r requirements.txt
-python main.py
+    O-->>CLI: Final validated summary
+    CLI->>U: Display 50-page report in Markdown
 ```
