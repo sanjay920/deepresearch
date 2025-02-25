@@ -12,6 +12,8 @@ from rich.align import Align
 from conversation import Conversation
 from config import CONFIG, SYSTEM_PROMPT, TOOLS
 from tools import google_search, web_research
+from rich.spinner import Spinner
+from rich.live import Live
 
 # Setup console and logging
 console = Console()
@@ -70,7 +72,7 @@ def main():
     """Main CLI interface for conversing with Claude and displaying thinking."""
     console.print(
         Panel.fit(
-            "[bold blue]Claude 3.7 Sonnet with Extended Thinking & Tools[/bold blue]",
+            "[bold blue]Deep Search[/bold blue]",
             title="Welcome",
         )
     )
@@ -139,195 +141,213 @@ def process_conversation(client, conversation, show_thinking):
     tool_input_json_parts = {}
 
     try:
-        # Stream the response from Claude
-        with client.messages.stream(
-            model=CONFIG["model"],
-            max_tokens=CONFIG["max_tokens"],
-            system=SYSTEM_PROMPT,
-            messages=conversation.get_messages(),
-            temperature=CONFIG["temperature"],
-            thinking={
-                "type": "enabled",
-                "budget_tokens": CONFIG["thinking"]["budget_tokens"],
-            },
-            tools=TOOLS,
-        ) as stream:
-            # Track content blocks for conversation history
-            current_block = None
+        # Create a spinner to show while waiting for the first response
+        spinner = Spinner("dots", text="Waiting for assistant...")
 
-            for event in stream:
-                if event.type == "content_block_start":
-                    block_type = event.content_block.type
-                    current_block = {"type": block_type}
+        # Start the spinner in a Live context
+        with Live(spinner, refresh_per_second=10, transient=True) as live:
+            # Stream the response from Claude
+            with client.messages.stream(
+                model=CONFIG["model"],
+                max_tokens=CONFIG["max_tokens"],
+                system=SYSTEM_PROMPT,
+                messages=conversation.get_messages(),
+                temperature=CONFIG["temperature"],
+                thinking={
+                    "type": "enabled",
+                    "budget_tokens": CONFIG["thinking"]["budget_tokens"],
+                },
+                tools=TOOLS,
+            ) as stream:
+                # Track content blocks for conversation history
+                current_block = None
 
-                    if block_type == "thinking":
-                        current_block["thinking"] = ""
-                        if show_thinking and not thinking_started:
-                            thinking_start_time = time.time()
-                            console.print("\n[bold blue]Thinking...[/bold blue]")
-                            thinking_started = True
+                for event in stream:
+                    # Stop the spinner on first event
+                    if live.is_started:
+                        live.stop()
 
-                    elif block_type == "redacted_thinking":
-                        current_block["data"] = ""
-                        if show_thinking and not thinking_started:
-                            console.print("\n[bold red]Redacted Thinking:[/bold red]")
+                    if event.type == "content_block_start":
+                        block_type = event.content_block.type
+                        current_block = {"type": block_type}
+
+                        if block_type == "thinking":
+                            current_block["thinking"] = ""
+                            if show_thinking and not thinking_started:
+                                thinking_start_time = time.time()
+                                console.print("\n[bold blue]Thinking...[/bold blue]")
+                                thinking_started = True
+
+                        elif block_type == "redacted_thinking":
+                            current_block["data"] = ""
+                            if show_thinking and not thinking_started:
+                                console.print(
+                                    "\n[bold red]Redacted Thinking:[/bold red]"
+                                )
+                                console.print(
+                                    "[red]Some thinking content was filtered for safety[/red]"
+                                )
+                                thinking_start_time = time.time()
+                                thinking_started = True
+
+                        elif block_type == "text":
+                            current_block["text"] = ""
+                            if not response_started:
+                                # Show thinking time if applicable
+                                if thinking_start_time:
+                                    elapsed = time.time() - thinking_start_time
+                                    minutes, seconds = divmod(int(elapsed), 60)
+                                    console.print(
+                                        f"\n[bold yellow]Thinking completed in {minutes:02d}:{seconds:02d}[/bold yellow]"
+                                    )
+
+                                # Add a separator between thinking and response
+                                if show_thinking and thinking_started:
+                                    console.print("\n" + "-" * 80 + "\n")
+                                console.print("\n[bold green]Assistant:[/bold green]")
+                                response_started = True
+
+                        elif block_type == "tool_use":
+                            is_tool_use = True
+                            current_block["id"] = event.content_block.id
+                            current_block["name"] = event.content_block.name
+                            current_block["input"] = event.content_block.input
+
+                            # More detailed logging to understand the structure
+                            logging.info(
+                                f"Tool call detected: {event.content_block.name}"
+                            )
+                            logging.info(f"Tool call ID: {event.content_block.id}")
+                            logging.info(
+                                f"Tool call input: {event.content_block.input}"
+                            )
+                            logging.info(f"Full content block: {event.content_block}")
+
+                            # Only add to tool_calls if we have input parameters
+                            if event.content_block.input:
+                                tool_calls.append(
+                                    {
+                                        "id": event.content_block.id,
+                                        "name": event.content_block.name,
+                                        "input": event.content_block.input,
+                                    }
+                                )
+                            else:
+                                # If input is empty, wait for potential updates in content_block_delta events
+                                logging.warning(
+                                    f"Empty input for tool {event.content_block.name}. Will wait for updates."
+                                )
+
+                            # Show tool use in console
+                            if not response_started:
+                                if thinking_start_time:
+                                    elapsed = time.time() - thinking_start_time
+                                    minutes, seconds = divmod(int(elapsed), 60)
+                                    console.print(
+                                        f"\n[bold yellow]Thinking completed in {minutes:02d}:{seconds:02d}[/bold yellow]"
+                                    )
+
+                                if show_thinking and thinking_started:
+                                    console.print("\n" + "-" * 80 + "\n")
+                                console.print("\n[bold green]Assistant:[/bold green]")
+                                response_started = True
+
                             console.print(
-                                "[red]Some thinking content was filtered for safety[/red]"
+                                f"\n[bold magenta]Using tool:[/bold magenta] {event.content_block.name}"
                             )
-                            thinking_start_time = time.time()
-                            thinking_started = True
 
-                    elif block_type == "text":
-                        current_block["text"] = ""
-                        if not response_started:
-                            # Show thinking time if applicable
-                            if thinking_start_time:
-                                elapsed = time.time() - thinking_start_time
-                                minutes, seconds = divmod(int(elapsed), 60)
+                    elif event.type == "content_block_delta":
+                        delta_type = event.delta.type
+
+                        # Log all delta types to understand what's coming through
+                        logging.info(f"Delta type: {delta_type}")
+                        logging.info(f"Delta content: {event.delta}")
+
+                        if delta_type == "thinking_delta":
+                            current_block["thinking"] += event.delta.thinking
+                            if show_thinking:
                                 console.print(
-                                    f"\n[bold yellow]Thinking completed in {minutes:02d}:{seconds:02d}[/bold yellow]"
+                                    event.delta.thinking, end="", highlight=False
                                 )
+                                sys.stdout.flush()
 
-                            # Add a separator between thinking and response
-                            if show_thinking and thinking_started:
-                                console.print("\n" + "-" * 80 + "\n")
-                            console.print("\n[bold green]Assistant:[/bold green]")
-                            response_started = True
-
-                    elif block_type == "tool_use":
-                        is_tool_use = True
-                        current_block["id"] = event.content_block.id
-                        current_block["name"] = event.content_block.name
-                        current_block["input"] = event.content_block.input
-
-                        # More detailed logging to understand the structure
-                        logging.info(f"Tool call detected: {event.content_block.name}")
-                        logging.info(f"Tool call ID: {event.content_block.id}")
-                        logging.info(f"Tool call input: {event.content_block.input}")
-                        logging.info(f"Full content block: {event.content_block}")
-
-                        # Only add to tool_calls if we have input parameters
-                        if event.content_block.input:
-                            tool_calls.append(
-                                {
-                                    "id": event.content_block.id,
-                                    "name": event.content_block.name,
-                                    "input": event.content_block.input,
-                                }
-                            )
-                        else:
-                            # If input is empty, wait for potential updates in content_block_delta events
-                            logging.warning(
-                                f"Empty input for tool {event.content_block.name}. Will wait for updates."
-                            )
-
-                        # Show tool use in console
-                        if not response_started:
-                            if thinking_start_time:
-                                elapsed = time.time() - thinking_start_time
-                                minutes, seconds = divmod(int(elapsed), 60)
-                                console.print(
-                                    f"\n[bold yellow]Thinking completed in {minutes:02d}:{seconds:02d}[/bold yellow]"
-                                )
-
-                            if show_thinking and thinking_started:
-                                console.print("\n" + "-" * 80 + "\n")
-                            console.print("\n[bold green]Assistant:[/bold green]")
-                            response_started = True
-
-                        console.print(
-                            f"\n[bold magenta]Using tool:[/bold magenta] {event.content_block.name}"
-                        )
-
-                elif event.type == "content_block_delta":
-                    delta_type = event.delta.type
-
-                    # Log all delta types to understand what's coming through
-                    logging.info(f"Delta type: {delta_type}")
-                    logging.info(f"Delta content: {event.delta}")
-
-                    if delta_type == "thinking_delta":
-                        current_block["thinking"] += event.delta.thinking
-                        if show_thinking:
-                            console.print(event.delta.thinking, end="", highlight=False)
+                        elif delta_type == "text_delta":
+                            current_block["text"] += event.delta.text
+                            console.print(event.delta.text, end="", highlight=False)
                             sys.stdout.flush()
 
-                    elif delta_type == "text_delta":
-                        current_block["text"] += event.delta.text
-                        console.print(event.delta.text, end="", highlight=False)
-                        sys.stdout.flush()
+                        elif delta_type == "input_json_delta":
+                            # Handle partial JSON for tool inputs
+                            if current_block and current_block["type"] == "tool_use":
+                                tool_id = current_block.get("id")
+                                if tool_id not in tool_input_json_parts:
+                                    tool_input_json_parts[tool_id] = ""
 
-                    elif delta_type == "input_json_delta":
-                        # Handle partial JSON for tool inputs
-                        if current_block and current_block["type"] == "tool_use":
-                            tool_id = current_block.get("id")
-                            if tool_id not in tool_input_json_parts:
-                                tool_input_json_parts[tool_id] = ""
+                                # Append the partial JSON
+                                if hasattr(event.delta, "partial_json"):
+                                    tool_input_json_parts[
+                                        tool_id
+                                    ] += event.delta.partial_json
 
-                            # Append the partial JSON
-                            if hasattr(event.delta, "partial_json"):
-                                tool_input_json_parts[
-                                    tool_id
-                                ] += event.delta.partial_json
-
-                                # Try to parse the JSON if it looks complete
-                                json_str = tool_input_json_parts[tool_id]
-                                if json_str and (
-                                    json_str.startswith("{") and json_str.endswith("}")
-                                ):
-                                    try:
-                                        # Parse the complete JSON
-                                        input_params = json.loads(json_str)
-                                        logging.info(
-                                            f"Parsed tool input: {input_params}"
-                                        )
-
-                                        # Update the current block
-                                        current_block["input"] = input_params
-
-                                        # Update or add to tool_calls
-                                        tool_call_exists = False
-                                        for tool_call in tool_calls:
-                                            if tool_call["id"] == tool_id:
-                                                tool_call["input"] = input_params
-                                                tool_call_exists = True
-                                                break
-
-                                        if not tool_call_exists:
-                                            tool_calls.append(
-                                                {
-                                                    "id": tool_id,
-                                                    "name": current_block["name"],
-                                                    "input": input_params,
-                                                }
+                                    # Try to parse the JSON if it looks complete
+                                    json_str = tool_input_json_parts[tool_id]
+                                    if json_str and (
+                                        json_str.startswith("{")
+                                        and json_str.endswith("}")
+                                    ):
+                                        try:
+                                            # Parse the complete JSON
+                                            input_params = json.loads(json_str)
+                                            logging.info(
+                                                f"Parsed tool input: {input_params}"
                                             )
 
-                                    except json.JSONDecodeError:
-                                        # JSON is not complete yet, continue collecting
-                                        logging.info(
-                                            f"Partial JSON not yet complete: {json_str}"
-                                        )
+                                            # Update the current block
+                                            current_block["input"] = input_params
 
-                    elif delta_type == "signature_delta":
-                        current_block["signature"] = event.delta.signature
+                                            # Update or add to tool_calls
+                                            tool_call_exists = False
+                                            for tool_call in tool_calls:
+                                                if tool_call["id"] == tool_id:
+                                                    tool_call["input"] = input_params
+                                                    tool_call_exists = True
+                                                    break
 
-                elif event.type == "content_block_stop":
-                    if current_block:
-                        all_content_blocks.append(current_block)
-                        current_block = None
-                        # Add a newline after each content block
-                        console.print()
+                                            if not tool_call_exists:
+                                                tool_calls.append(
+                                                    {
+                                                        "id": tool_id,
+                                                        "name": current_block["name"],
+                                                        "input": input_params,
+                                                    }
+                                                )
 
-            # Add assistant's response to conversation history
-            conversation.add_assistant_message(all_content_blocks)
+                                        except json.JSONDecodeError:
+                                            # JSON is not complete yet, continue collecting
+                                            logging.info(
+                                                f"Partial JSON not yet complete: {json_str}"
+                                            )
 
-            # Display token usage if available
-            if hasattr(stream, "usage") and stream.usage:
-                input_tokens = stream.usage.input_tokens
-                output_tokens = stream.usage.output_tokens
-                console.print(
-                    f"\n[dim]Token usage: {input_tokens} input, {output_tokens} output[/dim]"
-                )
+                        elif delta_type == "signature_delta":
+                            current_block["signature"] = event.delta.signature
+
+                    elif event.type == "content_block_stop":
+                        if current_block:
+                            all_content_blocks.append(current_block)
+                            current_block = None
+                            # Add a newline after each content block
+                            console.print()
+
+                # Add assistant's response to conversation history
+                conversation.add_assistant_message(all_content_blocks)
+
+                # Display token usage if available
+                if hasattr(stream, "usage") and stream.usage:
+                    input_tokens = stream.usage.input_tokens
+                    output_tokens = stream.usage.output_tokens
+                    console.print(
+                        f"\n[dim]Token usage: {input_tokens} input, {output_tokens} output[/dim]"
+                    )
 
         # Handle tool calls if any
         if is_tool_use:
@@ -366,151 +386,165 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
         show_thinking: Whether to display thinking (not used in this function)
     """
     try:
-        # Stream the response from Claude without thinking enabled
-        with client.messages.stream(
-            model=CONFIG["model"],
-            max_tokens=CONFIG["max_tokens"],
-            system=SYSTEM_PROMPT,
-            messages=conversation.get_messages(),
-            temperature=CONFIG["temperature"],
-            # No thinking parameter here
-            tools=TOOLS,
-        ) as stream:
-            # Track content blocks for conversation history
-            all_content_blocks = []
-            current_block = None
-            response_started = False
-            tool_calls = []
-            is_tool_use = False
-            tool_input_json_parts = {}
+        # Create a spinner to show while waiting for the first response
+        spinner = Spinner("dots", text="Processing tool results...")
 
-            for event in stream:
-                if event.type == "content_block_start":
-                    block_type = event.content_block.type
-                    current_block = {"type": block_type}
+        # Start the spinner in a Live context
+        with Live(spinner, refresh_per_second=10, transient=True) as live:
+            # Stream the response from Claude without thinking enabled
+            with client.messages.stream(
+                model=CONFIG["model"],
+                max_tokens=CONFIG["max_tokens"],
+                system=SYSTEM_PROMPT,
+                messages=conversation.get_messages(),
+                temperature=CONFIG["temperature"],
+                # No thinking parameter here
+                tools=TOOLS,
+            ) as stream:
+                # Track content blocks for conversation history
+                all_content_blocks = []
+                current_block = None
+                response_started = False
+                tool_calls = []
+                is_tool_use = False
+                tool_input_json_parts = {}
 
-                    if block_type == "text":
-                        current_block["text"] = ""
-                        if not response_started:
-                            console.print("\n[bold green]Assistant:[/bold green]")
-                            response_started = True
+                for event in stream:
+                    # Stop the spinner on first event
+                    if live.is_started:
+                        live.stop()
 
-                    elif block_type == "tool_use":
-                        is_tool_use = True
-                        current_block["id"] = event.content_block.id
-                        current_block["name"] = event.content_block.name
-                        current_block["input"] = event.content_block.input
+                    if event.type == "content_block_start":
+                        block_type = event.content_block.type
+                        current_block = {"type": block_type}
 
-                        # More detailed logging to understand the structure
-                        logging.info(f"Tool call detected: {event.content_block.name}")
-                        logging.info(f"Tool call ID: {event.content_block.id}")
-                        logging.info(f"Tool call input: {event.content_block.input}")
-                        logging.info(f"Full content block: {event.content_block}")
+                        if block_type == "text":
+                            current_block["text"] = ""
+                            if not response_started:
+                                console.print("\n[bold green]Assistant:[/bold green]")
+                                response_started = True
 
-                        # Only add to tool_calls if we have input parameters
-                        if event.content_block.input:
-                            tool_calls.append(
-                                {
-                                    "id": event.content_block.id,
-                                    "name": event.content_block.name,
-                                    "input": event.content_block.input,
-                                }
+                        elif block_type == "tool_use":
+                            is_tool_use = True
+                            current_block["id"] = event.content_block.id
+                            current_block["name"] = event.content_block.name
+                            current_block["input"] = event.content_block.input
+
+                            # More detailed logging to understand the structure
+                            logging.info(
+                                f"Tool call detected: {event.content_block.name}"
                             )
-                        else:
-                            # If input is empty, wait for potential updates in content_block_delta events
-                            logging.warning(
-                                f"Empty input for tool {event.content_block.name}. Will wait for updates."
+                            logging.info(f"Tool call ID: {event.content_block.id}")
+                            logging.info(
+                                f"Tool call input: {event.content_block.input}"
+                            )
+                            logging.info(f"Full content block: {event.content_block}")
+
+                            # Only add to tool_calls if we have input parameters
+                            if event.content_block.input:
+                                tool_calls.append(
+                                    {
+                                        "id": event.content_block.id,
+                                        "name": event.content_block.name,
+                                        "input": event.content_block.input,
+                                    }
+                                )
+                            else:
+                                # If input is empty, wait for potential updates in content_block_delta events
+                                logging.warning(
+                                    f"Empty input for tool {event.content_block.name}. Will wait for updates."
+                                )
+
+                            # Show tool use in console
+                            if not response_started:
+                                console.print("\n[bold green]Assistant:[/bold green]")
+                                response_started = True
+
+                            console.print(
+                                f"\n[bold magenta]Using tool:[/bold magenta] {event.content_block.name}"
                             )
 
-                        # Show tool use in console
-                        if not response_started:
-                            console.print("\n[bold green]Assistant:[/bold green]")
-                            response_started = True
+                    elif event.type == "content_block_delta":
+                        delta_type = event.delta.type
 
-                        console.print(
-                            f"\n[bold magenta]Using tool:[/bold magenta] {event.content_block.name}"
-                        )
+                        # Log all delta types to understand what's coming through
+                        logging.info(f"Delta type: {delta_type}")
+                        logging.info(f"Delta content: {event.delta}")
 
-                elif event.type == "content_block_delta":
-                    delta_type = event.delta.type
+                        if delta_type == "text_delta":
+                            current_block["text"] += event.delta.text
+                            console.print(event.delta.text, end="", highlight=False)
+                            sys.stdout.flush()
 
-                    # Log all delta types to understand what's coming through
-                    logging.info(f"Delta type: {delta_type}")
-                    logging.info(f"Delta content: {event.delta}")
+                        elif delta_type == "input_json_delta":
+                            # Handle partial JSON for tool inputs
+                            if current_block and current_block["type"] == "tool_use":
+                                tool_id = current_block.get("id")
+                                if tool_id not in tool_input_json_parts:
+                                    tool_input_json_parts[tool_id] = ""
 
-                    if delta_type == "text_delta":
-                        current_block["text"] += event.delta.text
-                        console.print(event.delta.text, end="", highlight=False)
-                        sys.stdout.flush()
+                                # Append the partial JSON
+                                if hasattr(event.delta, "partial_json"):
+                                    tool_input_json_parts[
+                                        tool_id
+                                    ] += event.delta.partial_json
 
-                    elif delta_type == "input_json_delta":
-                        # Handle partial JSON for tool inputs
-                        if current_block and current_block["type"] == "tool_use":
-                            tool_id = current_block.get("id")
-                            if tool_id not in tool_input_json_parts:
-                                tool_input_json_parts[tool_id] = ""
-
-                            # Append the partial JSON
-                            if hasattr(event.delta, "partial_json"):
-                                tool_input_json_parts[
-                                    tool_id
-                                ] += event.delta.partial_json
-
-                                # Try to parse the JSON if it looks complete
-                                json_str = tool_input_json_parts[tool_id]
-                                if json_str and (
-                                    json_str.startswith("{") and json_str.endswith("}")
-                                ):
-                                    try:
-                                        # Parse the complete JSON
-                                        input_params = json.loads(json_str)
-                                        logging.info(
-                                            f"Parsed tool input: {input_params}"
-                                        )
-
-                                        # Update the current block
-                                        current_block["input"] = input_params
-
-                                        # Update or add to tool_calls
-                                        tool_call_exists = False
-                                        for tool_call in tool_calls:
-                                            if tool_call["id"] == tool_id:
-                                                tool_call["input"] = input_params
-                                                tool_call_exists = True
-                                                break
-
-                                        if not tool_call_exists:
-                                            tool_calls.append(
-                                                {
-                                                    "id": tool_id,
-                                                    "name": current_block["name"],
-                                                    "input": input_params,
-                                                }
+                                    # Try to parse the JSON if it looks complete
+                                    json_str = tool_input_json_parts[tool_id]
+                                    if json_str and (
+                                        json_str.startswith("{")
+                                        and json_str.endswith("}")
+                                    ):
+                                        try:
+                                            # Parse the complete JSON
+                                            input_params = json.loads(json_str)
+                                            logging.info(
+                                                f"Parsed tool input: {input_params}"
                                             )
 
-                                    except json.JSONDecodeError:
-                                        # JSON is not complete yet, continue collecting
-                                        logging.info(
-                                            f"Partial JSON not yet complete: {json_str}"
-                                        )
+                                            # Update the current block
+                                            current_block["input"] = input_params
 
-                elif event.type == "content_block_stop":
-                    if current_block:
-                        all_content_blocks.append(current_block)
-                        current_block = None
-                        # Add a newline after each content block
-                        console.print()
+                                            # Update or add to tool_calls
+                                            tool_call_exists = False
+                                            for tool_call in tool_calls:
+                                                if tool_call["id"] == tool_id:
+                                                    tool_call["input"] = input_params
+                                                    tool_call_exists = True
+                                                    break
 
-            # Add assistant's response to conversation history
-            conversation.add_assistant_message(all_content_blocks)
+                                            if not tool_call_exists:
+                                                tool_calls.append(
+                                                    {
+                                                        "id": tool_id,
+                                                        "name": current_block["name"],
+                                                        "input": input_params,
+                                                    }
+                                                )
 
-            # Display token usage if available
-            if hasattr(stream, "usage") and stream.usage:
-                input_tokens = stream.usage.input_tokens
-                output_tokens = stream.usage.output_tokens
-                console.print(
-                    f"\n[dim]Token usage: {input_tokens} input, {output_tokens} output[/dim]"
-                )
+                                        except json.JSONDecodeError:
+                                            # JSON is not complete yet, continue collecting
+                                            logging.info(
+                                                f"Partial JSON not yet complete: {json_str}"
+                                            )
+
+                    elif event.type == "content_block_stop":
+                        if current_block:
+                            all_content_blocks.append(current_block)
+                            current_block = None
+                            # Add a newline after each content block
+                            console.print()
+
+                # Add assistant's response to conversation history
+                conversation.add_assistant_message(all_content_blocks)
+
+                # Display token usage if available
+                if hasattr(stream, "usage") and stream.usage:
+                    input_tokens = stream.usage.input_tokens
+                    output_tokens = stream.usage.output_tokens
+                    console.print(
+                        f"\n[dim]Token usage: {input_tokens} input, {output_tokens} output[/dim]"
+                    )
 
         # Handle tool calls if any
         if is_tool_use:
