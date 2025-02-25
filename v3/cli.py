@@ -2,10 +2,12 @@
 import anthropic
 import sys
 import logging
+import time
+import threading
+import os
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.syntax import Syntax
+from rich.align import Align
 from conversation import Conversation
 from config import CONFIG, SYSTEM_PROMPT
 
@@ -28,7 +30,8 @@ def main():
     )
     console.print("Type your messages or [blue]'exit'[/blue] to quit")
     console.print(
-        "Commands: [blue]thinking:on[/blue], [blue]thinking:off[/blue], [blue]clear[/blue]"
+        "Commands: [blue]thinking:on[/blue], [blue]thinking:off[/blue], "
+        "[blue]clear[/blue]"
     )
 
     # Initialize Anthropic client
@@ -63,11 +66,13 @@ def main():
         conversation.add_user_message(user_input)
 
         # Initialize content variables
-        thinking_content = ""
         response_content = ""
 
         # Show a simple "thinking" message
         console.print("[bold yellow]Message Received[/bold yellow]")
+
+        # Timer variables
+        thinking_start_time = None
 
         try:
             # Stream the response from Claude
@@ -97,7 +102,9 @@ def main():
                         if event.content_block.type == "thinking":
                             current_block["thinking"] = ""
                             if show_thinking and not thinking_started:
-                                console.print("\n[bold blue]Thinking:[/bold blue]")
+                                # Start the timer when thinking begins
+                                thinking_start_time = time.time()
+                                console.print("\n[bold blue]Thinking...[/bold blue]")
                                 thinking_started = True
 
                         elif event.content_block.type == "redacted_thinking":
@@ -107,13 +114,26 @@ def main():
                                     "\n[bold red]Redacted Thinking:[/bold red]"
                                 )
                                 console.print(
-                                    "[red]Some thinking content was filtered for safety[/red]"
+                                    "[red]Some thinking content was filtered "
+                                    "for safety[/red]"
                                 )
+                                # Start the timer for redacted thinking too
+                                thinking_start_time = time.time()
+                                console.print("\n[bold blue]Thinking...[/bold blue]")
                                 thinking_started = True
 
                         elif event.content_block.type == "text":
                             current_block["text"] = ""
                             if not response_started:
+                                # Display final thinking time
+                                if thinking_start_time:
+                                    elapsed = time.time() - thinking_start_time
+                                    minutes, seconds = divmod(int(elapsed), 60)
+                                    console.print(
+                                        f"\n[bold yellow]Thinking completed in "
+                                        f"{minutes:02d}:{seconds:02d}[/bold yellow]"
+                                    )
+
                                 # Add a clear separator between thinking and response
                                 if show_thinking and thinking_started:
                                     console.print("\n" + "-" * 80 + "\n")
@@ -124,17 +144,19 @@ def main():
                         if event.delta.type == "thinking_delta":
                             current_block["thinking"] += event.delta.thinking
                             if show_thinking:
-                                # Stream thinking content directly, just like the response
+                                # Stream thinking content directly
                                 console.print(
                                     event.delta.thinking, end="", highlight=False
                                 )
-                                sys.stdout.flush()  # Ensure output is displayed immediately
+                                # Ensure output is displayed immediately
+                                sys.stdout.flush()
 
                         elif event.delta.type == "text_delta":
                             current_block["text"] += event.delta.text
                             response_content += event.delta.text
                             console.print(event.delta.text, end="", highlight=False)
-                            sys.stdout.flush()  # Ensure output is displayed immediately
+                            # Ensure output is displayed immediately
+                            sys.stdout.flush()
 
                         elif event.delta.type == "signature_delta":
                             current_block["signature"] = event.delta.signature
@@ -154,7 +176,8 @@ def main():
                     input_tokens = stream.usage.input_tokens
                     output_tokens = stream.usage.output_tokens
                     console.print(
-                        f"\n[dim]Token usage: {input_tokens} input, {output_tokens} output[/dim]"
+                        f"\n[dim]Token usage: {input_tokens} input, "
+                        f"{output_tokens} output[/dim]"
                     )
 
         except Exception as e:
