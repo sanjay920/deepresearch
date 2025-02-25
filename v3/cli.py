@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.align import Align
 from conversation import Conversation
-from config import CONFIG, SYSTEM_PROMPT, TOOLS
+from config import CONFIG, SYSTEM_PROMPT, TOOLS, append_timestamp_to_message
 from tools import google_search, web_research
 from rich.spinner import Spinner
 from rich.live import Live
@@ -110,8 +110,11 @@ def main():
             console.print("[bold blue]Conversation history cleared[/bold blue]")
             continue
 
+        # Add timestamp to user message before adding to conversation
+        timestamped_message = append_timestamp_to_message(user_input)
+
         # Add user message to conversation
-        conversation.add_user_message(user_input)
+        conversation.add_user_message(timestamped_message)
 
         # Show a simple "message received" notice
         console.print("[bold yellow]Message Received[/bold yellow]")
