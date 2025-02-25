@@ -10,10 +10,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.align import Align
 from conversation import Conversation
-from config import CONFIG, SYSTEM_PROMPT, TOOLS, append_timestamp_to_message
+from config import CONFIG, SYSTEM_PROMPT, TOOLS
 from tools import google_search, web_research
 from rich.spinner import Spinner
 from rich.live import Live
+import tiktoken
 
 # Setup console and logging
 console = Console()
@@ -24,6 +25,28 @@ logging.basicConfig(
         logging.FileHandler("claude_cli.log")
     ],  # Send logs to a file instead of stdout
 )
+
+
+# Initialize tiktoken encoder for token counting
+def get_encoder():
+    """Get the appropriate tiktoken encoder based on the model."""
+    model = CONFIG["model"]
+    try:
+        if "claude" in model.lower():
+            # For Claude models, use cl100k_base which is close to Claude's tokenizer
+            return tiktoken.get_encoding("cl100k_base")
+        else:
+            # Try to get model-specific encoding, fallback to cl100k_base
+            return tiktoken.encoding_for_model(model)
+    except:
+        # Fallback to cl100k_base if specific encoding not found
+        return tiktoken.get_encoding("cl100k_base")
+
+
+def count_tokens(text):
+    """Count the number of tokens in a text string."""
+    encoder = get_encoder()
+    return len(encoder.encode(text))
 
 
 def execute_tool_call(tool_call):
@@ -110,11 +133,12 @@ def main():
             console.print("[bold blue]Conversation history cleared[/bold blue]")
             continue
 
-        # Add timestamp to user message before adding to conversation
-        timestamped_message = append_timestamp_to_message(user_input)
+        # Count tokens in user message
+        user_tokens = count_tokens(user_input)
+        console.print(f"[cyan][User message tokens: {user_tokens}][/cyan]")
 
-        # Add user message to conversation
-        conversation.add_user_message(timestamped_message)
+        # Add user message to conversation without timestamp
+        conversation.add_user_message(user_input)
 
         # Show a simple "message received" notice
         console.print("[bold yellow]Message Received[/bold yellow]")
@@ -139,6 +163,16 @@ def process_conversation(client, conversation, show_thinking):
     response_started = False
     tool_calls = []
     is_tool_use = False
+    assistant_response_text = ""  # Track assistant's text response for token counting
+
+    # Get the user's message token count from the last message
+    last_user_message = None
+    for message in reversed(conversation.get_messages()):
+        if message["role"] == "user":
+            last_user_message = message["content"]
+            break
+
+    user_tokens = count_tokens(last_user_message) if last_user_message else 0
 
     # Add a variable to track partial JSON for tool inputs
     tool_input_json_parts = {}
@@ -147,13 +181,21 @@ def process_conversation(client, conversation, show_thinking):
         # Create a spinner to show while waiting for the first response
         spinner = Spinner("dots", text="Waiting for assistant...")
 
+        # Get current timestamp for this request
+        current_timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Create a timestamped system prompt
+        timestamped_system_prompt = (
+            f"{SYSTEM_PROMPT}\n\nCurrent time: {current_timestamp}"
+        )
+
         # Start the spinner in a Live context
         with Live(spinner, refresh_per_second=10, transient=True) as live:
             # Stream the response from Claude
             with client.messages.stream(
                 model=CONFIG["model"],
                 max_tokens=CONFIG["max_tokens"],
-                system=SYSTEM_PROMPT,
+                system=timestamped_system_prompt,  # Use timestamped system prompt
                 messages=conversation.get_messages(),
                 temperature=CONFIG["temperature"],
                 thinking={
@@ -276,6 +318,9 @@ def process_conversation(client, conversation, show_thinking):
 
                         elif delta_type == "text_delta":
                             current_block["text"] += event.delta.text
+                            assistant_response_text += (
+                                event.delta.text
+                            )  # Track for token counting
                             console.print(event.delta.text, end="", highlight=False)
                             sys.stdout.flush()
 
@@ -344,12 +389,41 @@ def process_conversation(client, conversation, show_thinking):
                 # Add assistant's response to conversation history
                 conversation.add_assistant_message(all_content_blocks)
 
+                # Count tokens in assistant's response
+                assistant_tokens = count_tokens(assistant_response_text)
+
+                # Count tokens in visible conversation (excluding thinking blocks)
+                if hasattr(conversation, "get_visible_messages"):
+                    visible_conversation_text = json.dumps(
+                        conversation.get_visible_messages()
+                    )
+                    visible_conversation_tokens = count_tokens(
+                        visible_conversation_text
+                    )
+                    overhead_tokens = (
+                        visible_conversation_tokens - user_tokens - assistant_tokens
+                    )
+                    total_tokens = user_tokens + assistant_tokens + overhead_tokens
+                else:
+                    # Count tokens in entire conversation
+                    conversation_text = json.dumps(conversation.get_messages())
+                    conversation_tokens = count_tokens(conversation_text)
+                    overhead_tokens = (
+                        conversation_tokens - user_tokens - assistant_tokens
+                    )
+                    total_tokens = user_tokens + assistant_tokens + overhead_tokens
+
+                # Display the total and breakdown
+                console.print(
+                    f"\n[cyan][Tokens: {total_tokens} total = {user_tokens} (user) + {assistant_tokens} (assistant) + {overhead_tokens} (overhead)][/cyan]"
+                )
+
                 # Display token usage if available
                 if hasattr(stream, "usage") and stream.usage:
                     input_tokens = stream.usage.input_tokens
                     output_tokens = stream.usage.output_tokens
                     console.print(
-                        f"\n[dim]Token usage: {input_tokens} input, {output_tokens} output[/dim]"
+                        f"[dim]API usage: {input_tokens} input, {output_tokens} output[/dim]"
                     )
 
         # Handle tool calls if any
@@ -391,6 +465,17 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
     try:
         # Create a spinner to show while waiting for the first response
         spinner = Spinner("dots", text="Processing tool results...")
+        assistant_response_text = (
+            ""  # Track assistant's text response for token counting
+        )
+
+        # Get current timestamp for this request
+        current_timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Create a timestamped system prompt
+        timestamped_system_prompt = (
+            f"{SYSTEM_PROMPT}\n\nCurrent time: {current_timestamp}"
+        )
 
         # Start the spinner in a Live context
         with Live(spinner, refresh_per_second=10, transient=True) as live:
@@ -398,7 +483,7 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
             with client.messages.stream(
                 model=CONFIG["model"],
                 max_tokens=CONFIG["max_tokens"],
-                system=SYSTEM_PROMPT,
+                system=timestamped_system_prompt,  # Use timestamped system prompt
                 messages=conversation.get_messages(),
                 temperature=CONFIG["temperature"],
                 # No thinking parameter here
@@ -476,6 +561,9 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
 
                         if delta_type == "text_delta":
                             current_block["text"] += event.delta.text
+                            assistant_response_text += (
+                                event.delta.text
+                            )  # Track for token counting
                             console.print(event.delta.text, end="", highlight=False)
                             sys.stdout.flush()
 
@@ -541,12 +629,59 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
                 # Add assistant's response to conversation history
                 conversation.add_assistant_message(all_content_blocks)
 
+                # Count tokens in assistant's response
+                assistant_tokens = count_tokens(assistant_response_text)
+
+                # Get the user's message token count from the last message
+                last_user_message = None
+                for message in reversed(conversation.get_messages()):
+                    if message["role"] == "user":
+                        if isinstance(message["content"], str):
+                            last_user_message = message["content"]
+                            break
+                        # Handle case where content is a list (tool results)
+                        elif isinstance(message["content"], list):
+                            for block in message["content"]:
+                                if block.get("type") == "tool_result":
+                                    last_user_message = block.get("content", "")
+                                    break
+
+                user_tokens = (
+                    count_tokens(last_user_message) if last_user_message else 0
+                )
+
+                # Count tokens in visible conversation (excluding thinking blocks)
+                if hasattr(conversation, "get_visible_messages"):
+                    visible_conversation_text = json.dumps(
+                        conversation.get_visible_messages()
+                    )
+                    visible_conversation_tokens = count_tokens(
+                        visible_conversation_text
+                    )
+                    overhead_tokens = (
+                        visible_conversation_tokens - user_tokens - assistant_tokens
+                    )
+                    total_tokens = user_tokens + assistant_tokens + overhead_tokens
+                else:
+                    # Count tokens in entire conversation
+                    conversation_text = json.dumps(conversation.get_messages())
+                    conversation_tokens = count_tokens(conversation_text)
+                    overhead_tokens = (
+                        conversation_tokens - user_tokens - assistant_tokens
+                    )
+                    total_tokens = user_tokens + assistant_tokens + overhead_tokens
+
+                # Display the total and breakdown
+                console.print(
+                    f"\n[cyan][Tokens: {total_tokens} total = {user_tokens} (user) + {assistant_tokens} (assistant) + {overhead_tokens} (overhead)][/cyan]"
+                )
+
                 # Display token usage if available
                 if hasattr(stream, "usage") and stream.usage:
                     input_tokens = stream.usage.input_tokens
                     output_tokens = stream.usage.output_tokens
                     console.print(
-                        f"\n[dim]Token usage: {input_tokens} input, {output_tokens} output[/dim]"
+                        f"[dim]API usage: {input_tokens} input, {output_tokens} output[/dim]"
                     )
 
         # Handle tool calls if any

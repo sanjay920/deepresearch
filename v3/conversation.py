@@ -10,6 +10,7 @@ class Conversation:
 
     def add_user_message(self, content: str):
         """Add a user message to the conversation."""
+        # Directly add the user message without any timestamp processing
         self.messages.append({"role": "user", "content": content})
 
     def add_assistant_message(self, content_blocks):
@@ -70,10 +71,18 @@ class Conversation:
                     thinking_blocks.append(block)
 
         # Create a new user message with tool results and preserved thinking blocks
+        # Only include thinking blocks if there are any (i.e., if this is a tool use turn)
+        content_blocks = []
+        if thinking_blocks:
+            content_blocks.extend(thinking_blocks)
+
+        content_blocks.append(
+            {"type": "tool_result", "tool_use_id": tool_id, "content": result}
+        )
+
         tool_result_message = {
             "role": "user",
-            "content": thinking_blocks
-            + [{"type": "tool_result", "tool_use_id": tool_id, "content": result}],
+            "content": content_blocks,
         }
 
         self.messages.append(tool_result_message)
@@ -93,3 +102,24 @@ class Conversation:
     def mark_not_first_turn(self):
         """Mark that we're no longer in the first conversation turn."""
         self._first_turn = False
+
+    def get_visible_messages(self):
+        """Get messages without thinking blocks for token counting."""
+        visible_messages = []
+        for message in self.messages:
+            if message["role"] == "user":
+                # User messages are kept as is
+                visible_messages.append(message)
+            elif message["role"] == "assistant":
+                # For assistant messages, filter out thinking blocks
+                visible_content = []
+                for block in message.get("content", []):
+                    if block["type"] not in ["thinking", "redacted_thinking"]:
+                        visible_content.append(block)
+
+                if visible_content:
+                    visible_messages.append(
+                        {"role": "assistant", "content": visible_content}
+                    )
+
+        return visible_messages
