@@ -11,7 +11,11 @@ from rich.panel import Panel
 from rich.align import Align
 from conversation import Conversation
 from config import CONFIG, SYSTEM_PROMPT, TOOLS
-from tools import google_search, web_research
+from tools import (
+    google_search,
+    web_research,
+    notion_agent,
+)
 from rich.spinner import Spinner
 from rich.live import Live
 import tiktoken
@@ -44,9 +48,31 @@ def get_encoder():
 
 
 def count_tokens(text):
-    """Count the number of tokens in a text string."""
+    """Count the number of tokens in a text string or content blocks."""
     encoder = get_encoder()
-    return len(encoder.encode(text))
+
+    # Handle different content types
+    if text is None:
+        return 0
+    elif isinstance(text, str):
+        # Simple string case
+        return len(encoder.encode(text))
+    elif isinstance(text, list):
+        # Content blocks case (from tool results)
+        logging.info(f"Counting tokens for content blocks (list of {len(text)} items)")
+        # Convert the content blocks to JSON and count tokens
+        return len(encoder.encode(json.dumps(text)))
+    else:
+        # Unexpected type
+        logging.warning(
+            f"Unexpected content type in count_tokens: {type(text).__name__}"
+        )
+        # Try to convert to string as fallback
+        try:
+            return len(encoder.encode(str(text)))
+        except Exception as e:
+            logging.error(f"Failed to count tokens: {str(e)}")
+            return 0  # Return 0 as fallback
 
 
 def execute_tool_call(tool_call):
@@ -63,22 +89,88 @@ def execute_tool_call(tool_call):
     tool_input = tool_call["input"]
 
     console.print(f"[bold yellow]Executing tool:[/bold yellow] {tool_name}")
+    logging.info(f"Starting tool execution: {tool_name}")
+    logging.info(f"Tool input: {tool_input}")
 
     try:
         if tool_name == "google_search":
             query = tool_input.get("query", tool_input.get("q", ""))
             if not query:
                 console.print("[bold red]Error:[/bold red] Empty search query")
+                logging.error("Empty search query provided to google_search tool")
                 return {"error": "Empty search query"}
 
             console.print(f"[dim]Searching for:[/dim] {query}")
-            return google_search(query)
+            logging.info(f"Google search query: {query}")
+            result = google_search(query)
+            # Break long line into multiple lines
+            msg = "Google search completed. "
+            msg += f"Result type: {type(result).__name__}"
+            logging.info(msg)
+            logging.debug(f"Google search result: {result}")
+            return result
 
         elif tool_name == "web_research":
             url = tool_input.get("url", "")
             query = tool_input.get("query", "")
             console.print(f"[dim]Researching:[/dim] {query} [dim]on[/dim] {url}")
-            return web_research(url, query)
+            logging.info(f"Web research: query='{query}', url='{url}'")
+            try:
+                result = web_research(url, query)
+                # Break long line into multiple lines
+                msg = "Web research completed. "
+                msg += f"Result type: {type(result).__name__}"
+                logging.info(msg)
+                # Ensure result is a dictionary before converting to JSON
+                if not isinstance(result, dict):
+                    # Break long line into multiple lines
+                    msg = "Web research returned non-dict result: "
+                    msg += f"{type(result).__name__}"
+                    logging.warning(msg)
+                    result = {
+                        "error": "Invalid response format",
+                        "raw_result": str(result),
+                    }
+                logging.info(
+                    f"Web research completed. Result type: {type(result).__name__}"
+                )
+                logging.debug(f"Web research result: {result}")
+                return result
+            except Exception as e:
+                error_msg = f"Web research error: {str(e)}"
+                logging.error(error_msg)
+                logging.error(f"Exception type: {type(e).__name__}", exc_info=True)
+                return {"error": error_msg}
+
+        elif tool_name == "notion_agent":
+            query = tool_input.get("query", "")
+            if not query:
+                console.print("[bold red]Error:[/bold red] Empty Notion query")
+                return {"error": "Empty Notion query"}
+
+            console.print(f"[dim]Processing Notion operation:[/dim] {query}")
+            result = notion_agent(query)
+
+            # Log the result for debugging
+            logging.info(f"Notion agent result: {result}")
+
+            # If there's an error, display it
+            if "error" in result:
+                console.print(
+                    f"[bold red]Notion agent error:[/bold red] {result['error']}"
+                )
+
+            return result
+
+        # Keep workspace_agent for backward compatibility
+        elif tool_name == "workspace_agent":
+            query = tool_input.get("query", "")
+            if not query:
+                console.print("[bold red]Error:[/bold red] Empty workspace query")
+                return {"error": "Empty workspace query"}
+
+            console.print(f"[dim]Processing document operation:[/dim] {query}")
+            return notion_agent(query)  # Redirect to notion_agent
 
         else:
             error_msg = f"Unknown tool: {tool_name}"
@@ -92,7 +184,18 @@ def execute_tool_call(tool_call):
 
 
 def main():
-    """Main CLI interface for conversing with Claude and displaying thinking."""
+    """
+    Main CLI interface for conversing with Claude and displaying thinking.
+
+    Features:
+    - Token management: Automatically trims thinking blocks when conversation
+      exceeds 80k tokens
+    - Empty response handling: Prevents API errors by replacing empty responses
+      with placeholder text
+    - Tool execution: Supports calling external tools and continuing the
+      conversation with results
+    - Thinking display: Shows Claude's thinking process (can be toggled on/off)
+    """
     console.print(
         Panel.fit(
             "[bold blue]Deep Search[/bold blue]",
@@ -147,6 +250,88 @@ def main():
         process_conversation(client, conversation, show_thinking)
 
 
+def trim_thinking_tokens(conversation, max_tokens=80000):
+    """
+    Trim thinking tokens from the conversation history when it exceeds max_tokens.
+    Removes the first 5 thinking blocks to reduce context size.
+
+    Args:
+        conversation: Conversation history manager
+        max_tokens: Maximum token threshold before trimming
+
+    Returns:
+        bool: True if trimming was performed, False otherwise
+    """
+    # Get all messages and count tokens
+    all_messages = conversation.get_messages()
+    conversation_text = json.dumps(all_messages)
+    total_tokens = count_tokens(conversation_text)
+
+    if total_tokens < max_tokens:
+        return False  # No trimming needed
+
+    logging.info(
+        f"Conversation exceeds {max_tokens} tokens ({total_tokens}). Trimming thinking blocks..."
+    )
+
+    # Find and remove the first 5 thinking blocks
+    thinking_blocks_removed = 0
+    for message in all_messages:
+        if message["role"] == "assistant" and "content" in message:
+            # Create a new content list without some thinking blocks
+            new_content = []
+            for block in message["content"]:
+                if (
+                    block["type"] in ["thinking", "redacted_thinking"]
+                    and thinking_blocks_removed < 5
+                ):
+                    thinking_blocks_removed += 1
+                    logging.info(f"Removed thinking block {thinking_blocks_removed}")
+                    continue  # Skip this thinking block
+                new_content.append(block)
+
+            # Replace the content with trimmed version
+            message["content"] = new_content
+
+            if thinking_blocks_removed >= 5:
+                break  # Stop after removing 5 blocks
+
+    # Also trim tool results if needed
+    if thinking_blocks_removed < 5:
+        for message in all_messages:
+            if (
+                message["role"] == "user"
+                and "content" in message
+                and isinstance(message["content"], list)
+            ):
+                new_content = []
+                for block in message["content"]:
+                    if block["type"] == "tool_result" and thinking_blocks_removed < 5:
+                        thinking_blocks_removed += 1
+                        logging.info(
+                            f"Removed tool result block {thinking_blocks_removed}"
+                        )
+                        continue  # Skip this tool result
+                    new_content.append(block)
+
+                message["content"] = new_content
+
+                if thinking_blocks_removed >= 5:
+                    break  # Stop after removing 5 blocks
+
+    # Update the conversation with trimmed messages
+    conversation.messages = all_messages
+
+    # Log the new token count
+    new_conversation_text = json.dumps(conversation.get_messages())
+    new_total_tokens = count_tokens(new_conversation_text)
+    logging.info(
+        f"After trimming: {new_total_tokens} tokens (saved {total_tokens - new_total_tokens} tokens)"
+    )
+
+    return True
+
+
 def process_conversation(client, conversation, show_thinking):
     """
     Process a complete conversation turn, handling thinking and tools.
@@ -156,6 +341,9 @@ def process_conversation(client, conversation, show_thinking):
         conversation: Conversation history manager
         show_thinking: Whether to display thinking blocks
     """
+    # Check if we need to trim thinking tokens
+    trim_thinking_tokens(conversation)
+
     # Initialize tracking variables
     all_content_blocks = []
     thinking_start_time = None
@@ -164,6 +352,7 @@ def process_conversation(client, conversation, show_thinking):
     tool_calls = []
     is_tool_use = False
     assistant_response_text = ""  # Track assistant's text response for token counting
+    empty_response = True  # Track if response contains only whitespace
 
     # Get the user's message token count from the last message
     last_user_message = None
@@ -317,11 +506,16 @@ def process_conversation(client, conversation, show_thinking):
                                 sys.stdout.flush()
 
                         elif delta_type == "text_delta":
-                            current_block["text"] += event.delta.text
+                            # Check if the text contains only whitespace
+                            text_content = event.delta.text
+                            if text_content.strip():
+                                empty_response = False  # Contains non-whitespace
+
+                            current_block["text"] += text_content
                             assistant_response_text += (
-                                event.delta.text
-                            )  # Track for token counting
-                            console.print(event.delta.text, end="", highlight=False)
+                                text_content  # Track for token counting
+                            )
+                            console.print(text_content, end="", highlight=False)
                             sys.stdout.flush()
 
                         elif delta_type == "input_json_delta":
@@ -345,6 +539,9 @@ def process_conversation(client, conversation, show_thinking):
                                     ):
                                         try:
                                             # Parse the complete JSON
+                                            logging.info(
+                                                f"Attempting to parse JSON: {json_str}"
+                                            )
                                             input_params = json.loads(json_str)
                                             logging.info(
                                                 f"Parsed tool input: {input_params}"
@@ -370,10 +567,22 @@ def process_conversation(client, conversation, show_thinking):
                                                     }
                                                 )
 
-                                        except json.JSONDecodeError:
+                                        except json.JSONDecodeError as json_err:
                                             # JSON is not complete yet, continue collecting
                                             logging.info(
                                                 f"Partial JSON not yet complete: {json_str}"
+                                            )
+                                            logging.info(
+                                                f"JSONDecodeError: {str(json_err)}"
+                                            )
+                                        except Exception as e:
+                                            # Log any other exceptions during JSON parsing
+                                            logging.error(
+                                                f"Error parsing JSON: {str(e)}"
+                                            )
+                                            logging.error(f"JSON string: {json_str}")
+                                            logging.error(
+                                                f"Exception type: {type(e).__name__}"
                                             )
 
                         elif delta_type == "signature_delta":
@@ -381,6 +590,19 @@ def process_conversation(client, conversation, show_thinking):
 
                     elif event.type == "content_block_stop":
                         if current_block:
+                            # If this is a text block and contains only whitespace, add a placeholder
+                            if (
+                                current_block["type"] == "text"
+                                and empty_response
+                                and not is_tool_use
+                            ):
+                                current_block["text"] = "I'm processing your request."
+                                console.print(
+                                    "\nAdded placeholder text to prevent empty response error.",
+                                    style="yellow",
+                                )
+                                empty_response = False
+
                             all_content_blocks.append(current_block)
                             current_block = None
                             # Add a newline after each content block
@@ -432,10 +654,33 @@ def process_conversation(client, conversation, show_thinking):
 
             # Execute each tool call and add results to conversation
             for tool_call in tool_calls:
+                logging.info(
+                    f"Executing tool call: {tool_call['name']} (ID: {tool_call['id']})"
+                )
                 result = execute_tool_call(tool_call)
-                result_str = json.dumps(result)
+                logging.info(f"Tool result type: {type(result).__name__}")
+
+                try:
+                    # Log the result before converting to JSON
+                    logging.debug(f"Raw tool result: {result}")
+                    result_str = json.dumps(result)
+                    logging.info(
+                        f"Converted tool result to JSON string (length: {len(result_str)})"
+                    )
+                except Exception as e:
+                    logging.error(f"Error converting tool result to JSON: {str(e)}")
+                    logging.error(f"Exception type: {type(e).__name__}")
+                    logging.error(f"Result that failed conversion: {result}")
+                    # Provide a fallback result
+                    result_str = json.dumps(
+                        {"error": f"Failed to convert result: {str(e)}"}
+                    )
+                    logging.info("Using fallback error result")
 
                 # FIXED: Only add the tool result without thinking blocks
+                logging.info(
+                    f"Adding tool result to conversation for ID: {tool_call['id']}"
+                )
                 conversation.add_tool_result(tool_call["id"], result_str)
                 console.print(f"[dim]Tool result added to conversation[/dim]")
 
@@ -444,6 +689,9 @@ def process_conversation(client, conversation, show_thinking):
                 "\n[bold yellow]Continuing with tool results...[/bold yellow]"
             )
 
+            # Check if we need to trim thinking tokens before continuing
+            trim_thinking_tokens(conversation)
+
             # IMPORTANT: Disable thinking for the tool result response
             # This is the key fix - we need to disable thinking when continuing after tool results
             process_conversation_without_thinking(client, conversation, show_thinking)
@@ -451,6 +699,8 @@ def process_conversation(client, conversation, show_thinking):
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {str(e)}")
         logging.error(f"API error: {str(e)}")
+        logging.error(f"Exception type: {type(e).__name__}")
+        logging.error(f"Exception details:", exc_info=True)
 
 
 def process_conversation_without_thinking(client, conversation, show_thinking):
@@ -462,12 +712,16 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
         conversation: Conversation history manager
         show_thinking: Whether to display thinking (not used in this function)
     """
+    # Check if we need to trim thinking tokens before continuing
+    trim_thinking_tokens(conversation)
+
     try:
         # Create a spinner to show while waiting for the first response
         spinner = Spinner("dots", text="Processing tool results...")
         assistant_response_text = (
             ""  # Track assistant's text response for token counting
         )
+        empty_response = True  # Track if response contains only whitespace
 
         # Get current timestamp for this request
         current_timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -518,17 +772,13 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
                             current_block["name"] = event.content_block.name
                             current_block["input"] = event.content_block.input
 
-                            # More detailed logging to understand the structure
+                            # Log tool use details
                             logging.info(
                                 f"Tool call detected: {event.content_block.name}"
                             )
                             logging.info(f"Tool call ID: {event.content_block.id}")
-                            logging.info(
-                                f"Tool call input: {event.content_block.input}"
-                            )
-                            logging.info(f"Full content block: {event.content_block}")
 
-                            # Only add to tool_calls if we have input parameters
+                            # Add to tool_calls if we have input parameters
                             if event.content_block.input:
                                 tool_calls.append(
                                     {
@@ -536,11 +786,6 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
                                         "name": event.content_block.name,
                                         "input": event.content_block.input,
                                     }
-                                )
-                            else:
-                                # If input is empty, wait for potential updates in content_block_delta events
-                                logging.warning(
-                                    f"Empty input for tool {event.content_block.name}. Will wait for updates."
                                 )
 
                             # Show tool use in console
@@ -555,16 +800,19 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
                     elif event.type == "content_block_delta":
                         delta_type = event.delta.type
 
-                        # Log all delta types to understand what's coming through
+                        # Log delta types
                         logging.info(f"Delta type: {delta_type}")
                         logging.info(f"Delta content: {event.delta}")
 
                         if delta_type == "text_delta":
-                            current_block["text"] += event.delta.text
-                            assistant_response_text += (
-                                event.delta.text
-                            )  # Track for token counting
-                            console.print(event.delta.text, end="", highlight=False)
+                            # Check if the text contains only whitespace
+                            text_content = event.delta.text
+                            if text_content.strip():
+                                empty_response = False  # Contains non-whitespace
+
+                            current_block["text"] += text_content
+                            assistant_response_text += text_content
+                            console.print(text_content, end="", highlight=False)
                             sys.stdout.flush()
 
                         elif delta_type == "input_json_delta":
@@ -588,6 +836,9 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
                                     ):
                                         try:
                                             # Parse the complete JSON
+                                            logging.info(
+                                                f"Attempting to parse JSON: {json_str}"
+                                            )
                                             input_params = json.loads(json_str)
                                             logging.info(
                                                 f"Parsed tool input: {input_params}"
@@ -613,14 +864,39 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
                                                     }
                                                 )
 
-                                        except json.JSONDecodeError:
+                                        except json.JSONDecodeError as json_err:
                                             # JSON is not complete yet, continue collecting
                                             logging.info(
                                                 f"Partial JSON not yet complete: {json_str}"
                                             )
+                                            logging.info(
+                                                f"JSONDecodeError: {str(json_err)}"
+                                            )
+                                        except Exception as e:
+                                            # Log any other exceptions during JSON parsing
+                                            logging.error(
+                                                f"Error parsing JSON: {str(e)}"
+                                            )
+                                            logging.error(f"JSON string: {json_str}")
+                                            logging.error(
+                                                f"Exception type: {type(e).__name__}"
+                                            )
 
                     elif event.type == "content_block_stop":
                         if current_block:
+                            # If this is a text block and contains only whitespace, add a placeholder
+                            if (
+                                current_block["type"] == "text"
+                                and empty_response
+                                and not is_tool_use
+                            ):
+                                current_block["text"] = "I'm processing your request."
+                                console.print(
+                                    "\nAdded placeholder text to prevent empty response error.",
+                                    style="yellow",
+                                )
+                                empty_response = False
+
                             all_content_blocks.append(current_block)
                             current_block = None
                             # Add a newline after each content block
@@ -629,26 +905,19 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
                 # Add assistant's response to conversation history
                 conversation.add_assistant_message(all_content_blocks)
 
-                # Count tokens in assistant's response
-                assistant_tokens = count_tokens(assistant_response_text)
-
                 # Get the user's message token count from the last message
                 last_user_message = None
                 for message in reversed(conversation.get_messages()):
                     if message["role"] == "user":
-                        if isinstance(message["content"], str):
-                            last_user_message = message["content"]
-                            break
-                        # Handle case where content is a list (tool results)
-                        elif isinstance(message["content"], list):
-                            for block in message["content"]:
-                                if block.get("type") == "tool_result":
-                                    last_user_message = block.get("content", "")
-                                    break
+                        last_user_message = message["content"]
+                        break
 
                 user_tokens = (
                     count_tokens(last_user_message) if last_user_message else 0
                 )
+
+                # Count tokens in assistant's response
+                assistant_tokens = count_tokens(assistant_response_text)
 
                 # Count tokens in visible conversation (excluding thinking blocks)
                 if hasattr(conversation, "get_visible_messages"):
@@ -690,8 +959,33 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
 
             # Execute each tool call and add results to conversation
             for tool_call in tool_calls:
+                logging.info(
+                    f"Executing tool call: {tool_call['name']} (ID: {tool_call['id']})"
+                )
                 result = execute_tool_call(tool_call)
-                result_str = json.dumps(result)
+                logging.info(f"Tool result type: {type(result).__name__}")
+
+                try:
+                    # Log the result before converting to JSON
+                    logging.debug(f"Raw tool result: {result}")
+                    result_str = json.dumps(result)
+                    logging.info(
+                        f"Converted tool result to JSON string (length: {len(result_str)})"
+                    )
+                except Exception as e:
+                    logging.error(f"Error converting tool result to JSON: {str(e)}")
+                    logging.error(f"Exception type: {type(e).__name__}")
+                    logging.error(f"Result that failed conversion: {result}")
+                    # Provide a fallback result
+                    result_str = json.dumps(
+                        {"error": f"Failed to convert result: {str(e)}"}
+                    )
+                    logging.info("Using fallback error result")
+
+                # FIXED: Only add the tool result without thinking blocks
+                logging.info(
+                    f"Adding tool result to conversation for ID: {tool_call['id']}"
+                )
                 conversation.add_tool_result(tool_call["id"], result_str)
                 console.print(f"[dim]Tool result added to conversation[/dim]")
 
@@ -699,11 +993,18 @@ def process_conversation_without_thinking(client, conversation, show_thinking):
             console.print(
                 "\n[bold yellow]Continuing with tool results...[/bold yellow]"
             )
+
+            # Check if we need to trim thinking tokens before continuing
+            trim_thinking_tokens(conversation)
+
+            # Process the conversation again
             process_conversation_without_thinking(client, conversation, show_thinking)
 
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {str(e)}")
         logging.error(f"API error: {str(e)}")
+        logging.error(f"Exception type: {type(e).__name__}")
+        logging.error(f"Exception details:", exc_info=True)
 
 
 if __name__ == "__main__":

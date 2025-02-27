@@ -26,7 +26,7 @@ SYSTEM_PROMPT = f"""You are a helpful AI assistant named Rubra.
 You answer user questions thoughtfully and accurately using tools when necessary.
 Current timestamp: {current_timestamp}
 
-You have access to tools that can search the web and research specific websites.
+You have access to tools that can search the web, research specific websites, and manage documents in Notion.
 ALWAYS use google_search for:
 - Current events, news, or sports information (like "what's the NBA schedule today?")
 - Facts that might have changed since your training
@@ -37,6 +37,18 @@ ALWAYS use web_research when:
 - A user specifically asks about content on a website (like "what are the headlines on cnbc.com?")
 - You need information from a specific URL
 - You need to verify information on a webpage
+
+ALWAYS use notion_agent when:
+- You want to create, edit, or manage documents in Notion
+- A user asks about documents in Notion
+- A user or you wants to add, modify, or remove sections in Notion documents
+- A user or you wants to export documents or get summaries of Notion documents
+
+IMPORTANT: When using notion_agent:
+1. Send a SINGLE, COMPLETE instruction that includes all details about the document operation
+2. Do NOT make multiple notion_agent calls for what should be a single document operation
+3. Let the notion_agent handle all document management steps internally
+4. Include all necessary details in your instruction (document titles, section names, content, etc.)
 
 When you don't know something, use your tools rather than making up information.
 
@@ -96,6 +108,20 @@ TOOLS = [
                     "type": "string",
                     "description": "The specific question to answer from the webpage.",
                 },
+            },
+        },
+    },
+    {
+        "name": "notion_agent",
+        "description": "Manages all document operations in Notion. Send a single, clear instruction about what document operations you want performed (create, edit, manage documents). The Notion agent will handle all necessary steps internally, including getting document content, making changes, and validating structure. For links, use the link property within text objects. For tables, specify table_width and create table_row blocks with cells. ALWAYS include proper citations when adding factual information to documents, with a References section at the end of each document.",
+        "input_schema": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A complete, detailed instruction for Notion document operations. Include all necessary details in a single query rather than making multiple calls.",
+                }
             },
         },
     },

@@ -1,5 +1,5 @@
-from typing import List, Dict, Any, Optional
 import logging
+import json
 
 
 class Conversation:
@@ -34,7 +34,8 @@ class Conversation:
                 tool_name = block.get("name", "unknown_tool")
                 tool_input = block.get("input", {})
                 logging.debug(
-                    f"Tool call detected - Name: {tool_name}, Parameters: {tool_input}"
+                    f"Tool call detected - Name: {tool_name}, "
+                    f"Parameters: {tool_input}"
                 )
 
                 message["content"].append(
@@ -54,14 +55,21 @@ class Conversation:
 
         Args:
             tool_id: The ID of the tool that was called
-            result: The result of the tool execution
+            result: The result of the tool execution (string or dict)
         """
+        logging.info(f"Adding tool result for tool ID: {tool_id}")
+        logging.info(f"Result type: {type(result).__name__}")
+
         # Get the last assistant message to preserve thinking blocks
         last_assistant_message = None
         for message in reversed(self.messages):
             if message["role"] == "assistant":
                 last_assistant_message = message
                 break
+
+        logging.info(
+            f"Found last assistant message: {last_assistant_message is not None}"
+        )
 
         # Extract thinking blocks from the last assistant message
         thinking_blocks = []
@@ -70,15 +78,41 @@ class Conversation:
                 if block["type"] in ["thinking", "redacted_thinking"]:
                     thinking_blocks.append(block)
 
+            logging.info(f"Extracted {len(thinking_blocks)} thinking blocks")
+
         # Create a new user message with tool results and preserved thinking blocks
-        # Only include thinking blocks if there are any (i.e., if this is a tool use turn)
+        # Only include thinking blocks if there are any
         content_blocks = []
         if thinking_blocks:
             content_blocks.extend(thinking_blocks)
+            logging.info(f"Added {len(thinking_blocks)} thinking blocks to content")
+
+        # Ensure result is a string
+        try:
+            if isinstance(result, dict):
+                logging.info("Converting dict result to JSON string")
+                result_str = json.dumps(result)
+            elif not isinstance(result, str):
+                logging.info(f"Converting {type(result).__name__} result to string")
+                result_str = str(result)
+            else:
+                logging.info("Result is already a string, using as is")
+                result_str = result
+
+            logging.debug(
+                f"Final result string (first 100 chars): {result_str[:100]}..."
+            )
+        except Exception as e:
+            logging.error(f"Error converting result to string: {str(e)}")
+            logging.error(f"Exception type: {type(e).__name__}")
+            # Provide a fallback
+            result_str = json.dumps({"error": f"Failed to convert result: {str(e)}"})
+            logging.info("Using fallback error result")
 
         content_blocks.append(
-            {"type": "tool_result", "tool_use_id": tool_id, "content": result}
+            {"type": "tool_result", "tool_use_id": tool_id, "content": result_str}
         )
+        logging.info(f"Created tool result content block for tool ID: {tool_id}")
 
         tool_result_message = {
             "role": "user",
@@ -86,6 +120,7 @@ class Conversation:
         }
 
         self.messages.append(tool_result_message)
+        logging.info("Added tool result message to conversation history")
 
     def get_messages(self):
         """Get all messages in the conversation."""
