@@ -9,15 +9,16 @@ from typing import Dict, Any
 from config import CONFIG, SYSTEM_PROMPT, TOOLS
 
 # Define a maximum recursion depth to prevent infinite loops
-MAX_DEEPSEARCH_DEPTH = 2
+MAX_DEEPSEARCH_DEPTH = 20
 
 
-def google_search(q: str) -> Dict[str, Any]:
+def google_search(q: str, include_images: bool = False) -> Dict[str, Any]:
     """
     Performs a Google search via local microservice.
 
     Args:
         q: The search query string
+        include_images: Whether to include image-related fields in the results (default: False)
 
     Returns:
         Dict containing search results or error
@@ -30,10 +31,13 @@ def google_search(q: str) -> Dict[str, Any]:
             f"Search for '{q}' returned {len(result.get('items', []))} results"
         )
 
-        # Save search results to a JSON file
-        _save_search_to_json(q, result)
+        # Optimize search results to reduce token usage
+        optimized_result = _optimize_search_results(result, include_images)
 
-        return result
+        # Save search results to a JSON file (save both original and optimized)
+        _save_search_to_json(q, result, optimized_result)
+
+        return optimized_result
     except Exception as e:
         logging.error(f"Search error: {e}")
         error_result = {"error": str(e), "items": []}
@@ -44,13 +48,131 @@ def google_search(q: str) -> Dict[str, Any]:
         return error_result
 
 
-def _save_search_to_json(query: str, result: Dict[str, Any]) -> None:
+def _optimize_search_results(
+    result: Dict[str, Any], include_images: bool = False
+) -> Dict[str, Any]:
+    """
+    Optimize search results to reduce token usage.
+
+    This function:
+    1. Trims snippets to a reasonable length
+    2. Removes unnecessary fields from pagemap
+    3. Keeps only the most relevant information
+    4. Optionally includes or excludes image-related fields
+
+    Args:
+        result: The original search result dictionary
+        include_images: Whether to include image-related fields (default: False)
+
+    Returns:
+        Dict containing optimized search results
+    """
+    optimized = {}
+
+    # Copy only essential top-level fields
+    if "items" in result:
+        items = result["items"]
+
+        optimized_items = []
+        for item in items:
+            optimized_item = {}
+
+            # Keep only essential fields
+            for key in ["title", "link", "displayLink", "snippet"]:
+                if key in item:
+                    # For snippet, truncate if too long (over 150 chars)
+                    if key == "snippet" and len(item[key]) > 150:
+                        optimized_item[key] = item[key][:147] + "..."
+                    else:
+                        optimized_item[key] = item[key]
+
+            # Handle pagemap more carefully - it can be very token-heavy
+            if "pagemap" in item:
+                optimized_pagemap = {}
+                pagemap = item["pagemap"]
+
+                # Determine which fields to keep based on include_images parameter
+                useful_fields = ["metatags"]
+                if include_images:
+                    useful_fields.extend(["cse_thumbnail", "cse_image"])
+
+                for field in useful_fields:
+                    if field in pagemap:
+                        # For thumbnails and images, just keep the src URL
+                        if (
+                            include_images
+                            and field in ["cse_thumbnail", "cse_image"]
+                            and isinstance(pagemap[field], list)
+                        ):
+                            optimized_entries = []
+                            for entry in pagemap[field]:
+                                if isinstance(entry, dict) and "src" in entry:
+                                    optimized_entries.append({"src": entry["src"]})
+                            if optimized_entries:
+                                optimized_pagemap[field] = optimized_entries
+
+                        # For metatags, only keep a few important ones
+                        elif field == "metatags" and isinstance(pagemap[field], list):
+                            optimized_metatags = []
+                            for metatag in pagemap[field]:
+                                if isinstance(metatag, dict):
+                                    important_tags = {}
+                                    for tag_key, tag_value in metatag.items():
+                                        # Check if tag contains important keywords
+                                        keywords = ["title", "description"]
+                                        keywords.extend(["og:", "twitter:"])
+
+                                        # Only include image-related metatags if include_images is True
+                                        image_keywords = [
+                                            "image",
+                                            "thumbnail",
+                                            "icon",
+                                            "logo",
+                                        ]
+                                        if include_images and any(
+                                            img_kw in tag_key.lower()
+                                            for img_kw in image_keywords
+                                        ):
+                                            important_tags[tag_key] = tag_value
+                                        elif any(
+                                            keyword in tag_key.lower()
+                                            for keyword in keywords
+                                        ):
+                                            important_tags[tag_key] = tag_value
+
+                                    if important_tags:
+                                        optimized_metatags.append(important_tags)
+                            if optimized_metatags:
+                                optimized_pagemap[field] = optimized_metatags
+
+                # Only add pagemap if we have optimized content
+                if optimized_pagemap:
+                    optimized_item["pagemap"] = optimized_pagemap
+
+            optimized_items.append(optimized_item)
+
+        optimized["items"] = optimized_items
+
+    # Add any error information if present
+    if "error" in result:
+        optimized["error"] = result["error"]
+
+    # Add a flag indicating whether images were included
+    optimized["_includes_images"] = include_images
+
+    return optimized
+
+
+def _save_search_to_json(
+    query: str, result: Dict[str, Any], optimized_result: Dict[str, Any] = None
+) -> None:
     """
     Save Google search results to a JSON file in the workspace directory.
 
     Args:
         query: The search query
-        result: The search result dictionary
+        result: The original search result dictionary
+        optimized_result: The optimized search result dictionary (optional)
     """
     try:
         # Ensure workspace directory exists
@@ -74,6 +196,40 @@ def _save_search_to_json(query: str, result: Dict[str, Any]) -> None:
             "results": result,
         }
 
+        # Add optimized results if provided
+        if optimized_result is not None:
+            search_data["optimized_results"] = optimized_result
+
+            # Add image inclusion information to metadata
+            if "_includes_images" in optimized_result:
+                search_data["includes_images"] = optimized_result["_includes_images"]
+
+            # Calculate token savings if possible
+            try:
+                import json
+
+                original_json = json.dumps(result)
+                optimized_json = json.dumps(optimized_result)
+                original_size = len(original_json)
+                optimized_size = len(optimized_json)
+                savings_percent = (
+                    ((original_size - optimized_size) / original_size) * 100
+                    if original_size > 0
+                    else 0
+                )
+
+                search_data["optimization_stats"] = {
+                    "original_size_chars": original_size,
+                    "optimized_size_chars": optimized_size,
+                    "size_reduction_percent": round(savings_percent, 2),
+                }
+
+                logging.info(
+                    f"Search result optimization: {round(savings_percent, 2)}% reduction in size"
+                )
+            except Exception as e:
+                logging.error(f"Error calculating optimization stats: {e}")
+
         # Write to file with pretty formatting
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(search_data, f, indent=2, ensure_ascii=False)
@@ -81,7 +237,10 @@ def _save_search_to_json(query: str, result: Dict[str, Any]) -> None:
         logging.info(f"Saved search results to {filepath}")
 
         # Add file path to result for reference
-        result["_saved_to_file"] = filepath
+        if optimized_result is not None:
+            optimized_result["_saved_to_file"] = filepath
+        else:
+            result["_saved_to_file"] = filepath
 
     except Exception as e:
         logging.error(f"Failed to save search to JSON: {e}")

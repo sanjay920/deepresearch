@@ -97,13 +97,17 @@ def execute_tool_call(tool_call):
 
         if tool_name == "google_search":
             query = tool_input.get("query", "")
+            include_images = tool_input.get("include_images", False)
+
             if not query:
                 console.print("[bold red]Error:[/bold red] Empty search query")
                 logging.error("Empty search query provided to google_search tool")
                 return {"error": "Empty search query"}
 
             console.print(f"[dim]Searching for:[/dim] {query}")
-            return google_search(query)
+            if include_images:
+                console.print(f"[dim]Including images in results[/dim]")
+            return google_search(query, include_images=include_images)
 
         elif tool_name == "web_research":
             url = tool_input.get("url", "")

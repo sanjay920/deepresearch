@@ -89,7 +89,13 @@ TOOLS = [
                 "query": {
                     "type": "string",
                     "description": "The search query string. Dont use too many terms.",
-                }
+                },
+                "include_images": {
+                    "type": "boolean",
+                    "description": "Whether to include image-related fields like cse_thumbnail and cse_image in the results. Defaults to false.",
+                    "default": False,
+                    "enum": [True, False],
+                },
             },
         },
     },
