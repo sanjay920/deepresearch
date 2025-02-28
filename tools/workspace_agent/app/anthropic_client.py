@@ -20,6 +20,7 @@ class AnthropicClient:
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
 
+        # Initialize the client with just the API key - no proxies parameter
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = "claude-3-7-sonnet-20250219"
 
@@ -35,6 +36,7 @@ class AnthropicClient:
     ) -> Dict[str, Any]:
         """Generate content with tool use capability."""
         try:
+            # Create a message with tools
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=4096,
@@ -44,13 +46,16 @@ class AnthropicClient:
                 tools=tools,
             )
 
+            # Process the response to extract tool calls
             tool_calls = []
             text_content = ""
 
+            # Extract text and tool calls from the response
             for content_block in response.content:
                 if content_block.type == "text":
                     text_content = content_block.text
                 elif content_block.type == "tool_use":
+                    # Access properties directly from content_block
                     tool_calls.append(
                         {
                             "name": content_block.name,
@@ -59,10 +64,7 @@ class AnthropicClient:
                         }
                     )
 
-            return {
-                "text": text_content,
-                "tool_calls": tool_calls,
-            }
+            return {"text": text_content, "tool_calls": tool_calls}
 
         except anthropic.RateLimitError as e:
             logger.error(f"Anthropic rate limit exceeded: {str(e)}")

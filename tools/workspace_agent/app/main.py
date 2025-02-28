@@ -64,14 +64,14 @@ DOCUMENT_TOOLS = [
             "properties": {
                 "file_name": {
                     "type": "string",
-                    "description": "Name of the file to create (must end with .md)",
+                    "description": "Name of the file to create (must end with .md). If not provided, a UUID-based filename will be generated.",
                 },
                 "text_content": {
                     "type": "string",
                     "description": "Initial content for the document",
                 },
             },
-            "required": ["file_name"],
+            "required": [],
         },
     },
     {
@@ -219,6 +219,46 @@ DOCUMENT_TOOLS = [
         "description": "Get a summary of all documents in the workspace",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "insert_section",
+        "description": "Insert a new section at a specific position in a document",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_name": {
+                    "type": "string",
+                    "description": "Name of the target file",
+                },
+                "section_name": {
+                    "type": "string",
+                    "description": "Name of the section to insert",
+                },
+                "text_content": {
+                    "type": "string",
+                    "description": "Content for the new section",
+                },
+                "position": {
+                    "type": "string",
+                    "description": "Where to insert the section: 'beginning', 'end', or 'after:SectionName'",
+                },
+            },
+            "required": ["file_name", "section_name", "text_content", "position"],
+        },
+    },
+    {
+        "name": "validate_document",
+        "description": "Validate a document's structure and fix common issues like duplicate headings",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_name": {
+                    "type": "string",
+                    "description": "Name of the file to validate",
+                },
+            },
+            "required": ["file_name"],
+        },
+    },
 ]
 
 
@@ -227,19 +267,25 @@ DOCUMENT_TOOLS = [
 # -------------------------------------------------------------------------
 def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
     """Execute a tool call based on the tool name and input."""
+    logger.info(f"Executing tool call: {tool_name} with input: {tool_input}")
+
     try:
         if tool_name == "create_document":
             file_name = tool_input.get("file_name", "")
             text_content = tool_input.get("text_content", "")
+
             result = DocumentManager.create_document(file_name, text_content)
 
             if "error" in result:
                 return {"success": False, "message": result["error"]}
 
+            # Get the actual filename that was used (might be UUID-generated)
+            actual_filename = result["file_name"]
+
             return {
                 "success": True,
-                "message": f"Document {file_name} created successfully",
-                "file_name": file_name,
+                "message": f"Document {actual_filename} created successfully",
+                "file_name": actual_filename,
             }
 
         elif tool_name == "add_section":
@@ -377,6 +423,48 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
                 "summary": summary,
             }
 
+        elif tool_name == "insert_section":
+            file_name = tool_input.get("file_name", "")
+            section_name = tool_input.get("section_name", "")
+            text_content = tool_input.get("text_content", "")
+            position = tool_input.get("position", "")
+
+            result = DocumentManager.insert_section(
+                file_name, section_name, text_content, position
+            )
+
+            if "error" in result:
+                return {"success": False, "message": result["error"]}
+
+            return {
+                "success": True,
+                "message": f"Section {section_name} inserted at {position} in {file_name}",
+                "file_name": file_name,
+                "section_name": section_name,
+            }
+
+        elif tool_name == "validate_document":
+            file_name = tool_input.get("file_name", "")
+
+            result = DocumentManager.validate_document(file_name)
+
+            if "error" in result:
+                return {"success": False, "message": result["error"]}
+
+            if result.get("issues_found", False):
+                return {
+                    "success": True,
+                    "message": f"Document {file_name} validated and issues fixed: {result.get('fixed_issues', '')}",
+                    "file_name": file_name,
+                    "fixed_issues": result.get("fixed_issues", ""),
+                }
+            else:
+                return {
+                    "success": True,
+                    "message": f"Document {file_name} validated. No issues found.",
+                    "file_name": file_name,
+                }
+
         else:
             return {"success": False, "message": f"Unknown tool: {tool_name}"}
 
@@ -409,10 +497,31 @@ async def process_workspace_query(query: WorkspaceQuery):
     system_instruction = (
         "You are a document workspace agent that can create, edit, and manage markdown documents. "
         "Your task is to understand the user's request and use the appropriate tools to fulfill it. "
-        "First, analyze what the user is asking for. Then, select and use the appropriate tool. "
-        "If you need to create a document or modify a section, make sure to format the content properly as markdown. "
-        "Always respond with a clear explanation of what you did or why you couldn't complete the request. "
-        "If the user's request is ambiguous, use your best judgment based on the context."
+        "You are responsible for ALL document operations - the main agent will delegate document tasks to you completely.\n\n"
+        "DOCUMENT OPERATION WORKFLOW:\n"
+        "1. Analyze the user's request to understand what document operations are needed.\n"
+        "2. Plan the sequence of operations required (get content, modify, validate, update).\n"
+        "3. Execute all necessary operations using your internal tools.\n"
+        "4. Validate the final document structure before completing the task.\n"
+        "5. Provide a clear summary of what was done.\n\n"
+        "DOCUMENT STRUCTURE GUIDELINES:\n"
+        "1. Maintain clean, consistent document structure with proper heading hierarchy.\n"
+        "2. Avoid duplicate headings or sections - check for duplicates before saving.\n"
+        "3. When adding new sections, place them in the logical position in the document.\n"
+        "4. When updating content, preserve existing formatting unless explicitly asked to change it.\n"
+        "5. Always validate document structure after making changes.\n\n"
+        "CITATION AND REFERENCE GUIDELINES:\n"
+        "1. Always cite sources when adding factual information to documents.\n"
+        "2. Use a consistent citation format (e.g., [1], [2], etc.) within the text.\n"
+        "3. Maintain a 'References' or 'Bibliography' section at the end of each document.\n"
+        "4. When updating a document, check if it has a References section - if not, create one.\n"
+        "5. When adding new information with citations, add the corresponding references to the References section.\n"
+        "6. Include full citation details: author, title, publication, date, URL (if applicable).\n\n"
+        "ERROR HANDLING:\n"
+        "1. If you encounter an error, try an alternative approach rather than giving up.\n"
+        "2. For complex operations, break them down into smaller steps.\n"
+        "3. If a document has structural issues, fix them before proceeding with the requested operation.\n"
+        "4. Always verify the final result matches what was requested."
     )
 
     try:

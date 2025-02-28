@@ -9,6 +9,7 @@ A microservice that manages a workspace of markdown documents. It provides a nat
 - Add, replace, remove, and rename sections
 - Export documents to different formats (simulated)
 - List documents and get workspace summaries
+- UUID-based filenames for better organization and uniqueness
 
 ## Environment Variables
 
