@@ -2,7 +2,14 @@ import requests
 import logging
 import json
 import os
+import anthropic
+import time
 from typing import Dict, Any
+from config import CONFIG, SYSTEM_PROMPT, TOOLS
+import datetime
+
+# Define a maximum recursion depth to prevent infinite loops
+MAX_DEEPSEARCH_DEPTH = 2
 
 
 def google_search(q: str) -> Dict[str, Any]:
@@ -32,6 +39,7 @@ def web_research(url: str, query: str) -> Dict[str, Any]:
     """
     Research a specific webpage to answer a question.
     Uses the web research microservice to do targeted extraction.
+    Saves the research results to a markdown file in the workspace directory.
 
     Args:
         url: The URL to research
@@ -47,10 +55,84 @@ def web_research(url: str, query: str) -> Dict[str, Any]:
         response.raise_for_status()
         result = response.json()
         logging.info(f"Web research for '{query}' on {url} completed")
+
+        # Save the research result to a markdown file
+        _save_research_to_markdown(url, query, result)
+
         return result
     except Exception as e:
         logging.error(f"Web research error: {e}")
-        return {"error": str(e), "answer": f"Failed to research {url}: {str(e)}"}
+        error_result = {
+            "error": str(e),
+            "answer": f"Failed to research {url}: {str(e)}",
+        }
+
+        # Save the error result to a markdown file
+        _save_research_to_markdown(url, query, error_result)
+
+        return error_result
+
+
+def _save_research_to_markdown(url: str, query: str, result: Dict[str, Any]) -> None:
+    """
+    Save web research results to a markdown file in the workspace directory.
+
+    Args:
+        url: The URL that was researched
+        query: The query that was asked
+        result: The research result dictionary
+    """
+    try:
+        # Ensure workspace directory exists
+        workspace_dir = _ensure_workspace_dir()
+
+        # Create a research directory if it doesn't exist
+        research_dir = os.path.join(workspace_dir, "research")
+        if not os.path.exists(research_dir):
+            os.makedirs(research_dir)
+
+        # Create a filename based on timestamp and sanitized query
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Sanitize query for filename (remove special chars, limit length)
+        sanitized_query = "".join(c for c in query if c.isalnum() or c.isspace())
+        sanitized_query = sanitized_query.replace(" ", "_")[:50]  # Limit length
+
+        filename = f"{timestamp}_{sanitized_query}.md"
+        filepath = os.path.join(research_dir, filename)
+
+        # Format the content
+        content = f"# Web Research: {query}\n\n"
+        content += f"## URL\n{url}\n\n"
+        content += f"## Query\n{query}\n\n"
+        content += "## Result\n"
+
+        if "error" in result:
+            content += f"### Error\n{result['error']}\n\n"
+
+        if "answer" in result:
+            content += f"### Answer\n{result['answer']}\n\n"
+
+        # Add any additional data from the result
+        for key, value in result.items():
+            if key not in ["error", "answer"]:
+                content += f"### {key.capitalize()}\n"
+                if isinstance(value, dict) or isinstance(value, list):
+                    content += f"```json\n{json.dumps(value, indent=2)}\n```\n\n"
+                else:
+                    content += f"{value}\n\n"
+
+        # Write to file
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logging.info(f"Saved research results to {filepath}")
+
+        # Add file path to result for reference
+        result["_saved_to_file"] = filepath
+
+    except Exception as e:
+        logging.error(f"Failed to save research to markdown: {e}")
+        # Don't raise the exception, just log it
 
 
 def notion_agent(query: str) -> Dict[str, Any]:
@@ -198,6 +280,58 @@ def notion_agent(query: str) -> Dict[str, Any]:
         return {
             "error": error_msg,
             "message": f"Failed to process Notion document operation: {str(e)}",
+        }
+
+
+def workspace_agent(query: str) -> Dict[str, Any]:
+    """
+    Sends a natural language query to the Document Workspace agent.
+
+    Args:
+        query: Natural language instruction for document operations
+
+    Returns:
+        Dict containing the response from the Workspace agent
+    """
+    try:
+        response = requests.post(
+            "http://localhost:8091/workspace/query", json={"query": query}, timeout=180
+        )
+        response.raise_for_status()
+        result = response.json()
+        logging.info(f"Workspace agent query completed: {query}")
+
+        # Extract the most relevant information from the result
+        operations_summary = ""
+
+        # Check if there are tool results in the response
+        if "tool_results" in result and result["tool_results"]:
+            operations_summary = "Operations performed:\n"
+
+            for i, tool_result in enumerate(result["tool_results"], 1):
+                tool_name = tool_result.get("tool", "unknown")
+                result_data = tool_result.get("result", {})
+
+                # Extract information based on the tool type
+                if result_data.get("success", False):
+                    message = result_data.get("message", "Operation completed")
+                    operations_summary += f"{i}. {message}\n"
+                else:
+                    error_msg = result_data.get("message", "Operation failed")
+                    operations_summary += f"{i}. Error: {error_msg}\n"
+
+        return {
+            "status": result.get("status", "unknown"),
+            "message": result.get("message", ""),
+            "operations_summary": operations_summary,
+            "correlation_id": result.get("correlation_id", ""),
+        }
+    except Exception as e:
+        error_msg = f"Workspace agent error: {str(e)}"
+        logging.error(error_msg)
+        return {
+            "error": error_msg,
+            "message": f"Failed to process document operation: {str(e)}",
         }
 
 
@@ -575,3 +709,274 @@ def export_document(file_name: str, export_format: str) -> Dict[str, Any]:
         error_msg = f"Failed to export document {file_name}: {str(e)}"
         logging.error(error_msg)
         return {"error": error_msg}
+
+
+def deepsearch_tool(
+    query: str, context: str = "", max_depth: int = None
+) -> Dict[str, Any]:
+    """
+    Invokes a new DeepSearch 'mini-session' to handle a sub-task.
+    It returns a structured result that can be used by the main conversation.
+    This tool runs for as long as needed without a maximum depth restriction.
+
+    Args:
+        query: The main question or task to handle
+        context: Optional additional context needed by DeepSearch
+        max_depth: Optional parameter (ignored, kept for backward compatibility)
+
+    Returns:
+        Dict containing the research result or error
+    """
+    # Track recursion depth for informational purposes only
+    current_depth = 0
+    if context and '"__deepsearch_depth__":' in context:
+        try:
+            # Extract the current depth from the context
+            depth_start = context.find('"__deepsearch_depth__":')
+            depth_start += len('"__deepsearch_depth__":')
+            depth_end = context.find(",", depth_start)
+            if depth_end == -1:
+                depth_end = context.find("}", depth_start)
+            current_depth = int(context[depth_start:depth_end].strip())
+        except Exception as e:
+            logging.error(f"Error extracting recursion depth: {str(e)}")
+
+    # Increment the recursion depth for this call (for tracking only)
+    new_depth = current_depth + 1
+
+    try:
+        # Import here to avoid circular imports
+        from conversation import Conversation
+
+        # Create a new conversation object for this sub-task
+        sub_conversation = Conversation()
+
+        # Add context if provided
+        if context.strip():
+            # Add metadata about recursion depth to the context
+            if '"__deepsearch_depth__":' not in context:
+                # If context is JSON, add the depth to it
+                if context.strip().startswith("{") and context.strip().endswith("}"):
+                    try:
+                        context_json = json.loads(context)
+                        context_json["__deepsearch_depth__"] = new_depth
+                        context = json.dumps(context_json)
+                    except Exception:
+                        # If not valid JSON, just append the depth info
+                        context = f"{context}\n\n__deepsearch_depth__: {new_depth}"
+                else:
+                    # Not JSON, just append the depth info
+                    context = f"{context}\n\n__deepsearch_depth__: {new_depth}"
+
+            # Add the context as a system message
+            sub_conversation.add_user_message(
+                f"[Context for this DeepSearch sub-task]\n{context}"
+            )
+
+        # Add the actual query as the next user message
+        sub_conversation.add_user_message(query)
+
+        # Set up the anthropic client
+        client = anthropic.Anthropic(api_key=CONFIG["anthropic_api_key"])
+
+        # Create a modified system prompt for the sub-task
+        sub_system_prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"You are running in a DeepSearch sub-task mode with recursion "
+            f"depth {new_depth}. "
+            f"You must produce a concise, well-structured result that can be "
+            f"used by the main conversation. "
+            f"Focus on answering the specific query without unnecessary "
+            f"elaboration. "
+            f"You still have access to all tools, including nested DeepSearch "
+            f"calls. "
+            f"DO NOT engage in conversation or ask questions - your goal is "
+            f"to independently research and provide a complete answer."
+        )
+
+        # Get current timestamp for this request
+        current_timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        timestamped_system_prompt = (
+            f"{sub_system_prompt}\n\nCurrent time: {current_timestamp}"
+        )
+
+        # Define a list to collect all content blocks
+        all_content_blocks = []
+        tool_calls = []
+
+        # Stream the response from Claude
+        with client.messages.stream(
+            model=CONFIG["model"],
+            max_tokens=CONFIG["max_tokens"],
+            system=timestamped_system_prompt,
+            messages=sub_conversation.get_messages(),
+            temperature=CONFIG["temperature"],
+            tools=TOOLS,
+        ) as stream:
+            current_block = None
+            tool_input_json_parts = {}
+
+            for event in stream:
+                if event.type == "content_block_start":
+                    block_type = event.content_block.type
+                    current_block = {"type": block_type}
+
+                    if block_type == "text":
+                        current_block["text"] = ""
+                    elif block_type == "tool_use":
+                        current_block["id"] = event.content_block.id
+                        current_block["name"] = event.content_block.name
+                        current_block["input"] = event.content_block.input
+
+                        # Only add to tool_calls if we have input parameters
+                        if event.content_block.input:
+                            tool_calls.append(
+                                {
+                                    "id": event.content_block.id,
+                                    "name": event.content_block.name,
+                                    "input": event.content_block.input,
+                                }
+                            )
+
+                elif event.type == "content_block_delta":
+                    delta_type = event.delta.type
+
+                    if delta_type == "text_delta":
+                        current_block["text"] += event.delta.text
+                    elif delta_type == "input_json_delta":
+                        # Handle partial JSON for tool inputs
+                        if current_block and current_block["type"] == "tool_use":
+                            tool_id = current_block.get("id")
+                            if tool_id not in tool_input_json_parts:
+                                tool_input_json_parts[tool_id] = ""
+
+                            # Append the partial JSON
+                            if hasattr(event.delta, "partial_json"):
+                                tool_input_json_parts[
+                                    tool_id
+                                ] += event.delta.partial_json
+
+                                # Try to parse the JSON if it looks complete
+                                json_str = tool_input_json_parts[tool_id]
+                                if json_str and (
+                                    json_str.startswith("{") and json_str.endswith("}")
+                                ):
+                                    try:
+                                        # Parse the complete JSON
+                                        input_params = json.loads(json_str)
+
+                                        # Update the current block
+                                        current_block["input"] = input_params
+
+                                        # Update or add to tool_calls
+                                        tool_call_exists = False
+                                        for tool_call in tool_calls:
+                                            if tool_call["id"] == tool_id:
+                                                tool_call["input"] = input_params
+                                                tool_call_exists = True
+                                                break
+
+                                        if not tool_call_exists:
+                                            tool_calls.append(
+                                                {
+                                                    "id": tool_id,
+                                                    "name": current_block["name"],
+                                                    "input": input_params,
+                                                }
+                                            )
+                                    except Exception:
+                                        # JSON is not complete yet, continue collecting
+                                        pass
+
+                elif event.type == "content_block_stop":
+                    if current_block:
+                        all_content_blocks.append(current_block)
+                        current_block = None
+
+            # Add assistant's response to conversation history
+            sub_conversation.add_assistant_message(all_content_blocks)
+
+            # Handle tool calls if any
+            for tool_call in tool_calls:
+                # Import here to avoid circular imports
+                from cli import execute_tool_call
+
+                # Execute the tool call
+                result = execute_tool_call(tool_call)
+
+                # Add the tool result to the conversation
+                try:
+                    result_str = json.dumps(result)
+                except Exception:
+                    result_str = json.dumps(
+                        {"error": "Failed to convert result to JSON"}
+                    )
+
+                sub_conversation.add_tool_result(tool_call["id"], result_str)
+
+                # Process the conversation again to get the final result
+                with client.messages.stream(
+                    model=CONFIG["model"],
+                    max_tokens=CONFIG["max_tokens"],
+                    system=timestamped_system_prompt,
+                    messages=sub_conversation.get_messages(),
+                    temperature=CONFIG["temperature"],
+                    tools=TOOLS,
+                ) as stream:
+                    final_content_blocks = []
+                    current_block = None
+
+                    for event in stream:
+                        if event.type == "content_block_start":
+                            block_type = event.content_block.type
+                            current_block = {"type": block_type}
+
+                            if block_type == "text":
+                                current_block["text"] = ""
+                            elif block_type == "tool_use":
+                                current_block["id"] = event.content_block.id
+                                current_block["name"] = event.content_block.name
+                                current_block["input"] = event.content_block.input
+
+                        elif event.type == "content_block_delta":
+                            delta_type = event.delta.type
+
+                            if delta_type == "text_delta":
+                                current_block["text"] += event.delta.text
+
+                        elif event.type == "content_block_stop":
+                            if current_block:
+                                final_content_blocks.append(current_block)
+                                current_block = None
+
+                    # Add assistant's final response to conversation history
+                    sub_conversation.add_assistant_message(final_content_blocks)
+
+        # Extract the final text response from the conversation
+        final_response = ""
+        for message in reversed(sub_conversation.get_messages()):
+            if message["role"] == "assistant":
+                for block in message.get("content", []):
+                    if block["type"] == "text":
+                        final_response = block.get("text", "")
+                        break
+                if final_response:
+                    break
+
+        # Return the result in a standardized format
+        return {
+            "result": final_response,
+            "metadata": {
+                "subtask": True,
+                "recursion_depth": new_depth,
+                "context_used": context,
+                "query": query,
+            },
+        }
+
+    except Exception as e:
+        logging.error(f"DeepSearch sub-task error: {str(e)}")
+        return {
+            "error": f"DeepSearch sub-task failed: {str(e)}",
+            "metadata": {"subtask": True, "recursion_depth": new_depth, "error": True},
+        }

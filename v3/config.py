@@ -112,16 +112,34 @@ TOOLS = [
         },
     },
     {
-        "name": "notion_agent",
-        "description": "Manages all document operations in Notion. Send a single, clear instruction about what document operations you want performed (create, edit, manage documents). The Notion agent will handle all necessary steps internally, including getting document content, making changes, and validating structure. For links, use the link property within text objects. For tables, specify table_width and create table_row blocks with cells. ALWAYS include proper citations when adding factual information to documents, with a References section at the end of each document.",
+        "name": "workspace_agent",
+        "description": "Manages all document operations in a markdown workspace. Send a single, clear instruction about what document operations you want performed (create, edit, manage documents). The workspace agent will handle all necessary steps internally, including getting document content, making changes, and validating structure.",
         "input_schema": {
             "type": "object",
             "required": ["query"],
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "A complete, detailed instruction for Notion document operations. Include all necessary details in a single query rather than making multiple calls.",
+                    "description": "A complete, detailed instruction for document operations. Include all necessary details in a single query rather than making multiple calls.",
                 }
+            },
+        },
+    },
+    {
+        "name": "deepsearch",
+        "description": "Handles recursive research and sub-tasks. Accepts a query and optional context to spawn a new DeepSearch instance that can perform complex research tasks.",
+        "input_schema": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The main question or task to handle.",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional additional context needed by DeepSearch.",
+                },
             },
         },
     },

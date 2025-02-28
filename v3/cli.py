@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
-import anthropic
-import sys
 import logging
 import time
-import threading
-import os
 import json
 from rich.console import Console
 from rich.panel import Panel
-from rich.align import Align
+import sys
+import tiktoken
+import anthropic
 from conversation import Conversation
 from config import CONFIG, SYSTEM_PROMPT, TOOLS
 from tools import (
     google_search,
     web_research,
+    workspace_agent,
+    deepsearch_tool,
+)
+from rich.spinner import Spinner
+from rich.live import Live
+import os
+from rich.console import Console
+from conversation import Conversation
+from config import CONFIG, SYSTEM_PROMPT, TOOLS, append_timestamp_to_message
+from tools import (
+    google_search,
+    web_research,
     notion_agent,
+    workspace_agent,
+    deepsearch_tool,
 )
 from rich.spinner import Spinner
 from rich.live import Live
@@ -32,9 +44,8 @@ logging.basicConfig(
 
 
 # Initialize tiktoken encoder for token counting
-def get_encoder():
-    """Get the appropriate tiktoken encoder based on the model."""
-    model = CONFIG["model"]
+def get_encoder(model):
+    """Get the appropriate tokenizer for the model."""
     try:
         if "claude" in model.lower():
             # For Claude models, use cl100k_base which is close to Claude's tokenizer
@@ -42,14 +53,14 @@ def get_encoder():
         else:
             # Try to get model-specific encoding, fallback to cl100k_base
             return tiktoken.encoding_for_model(model)
-    except:
+    except Exception:
         # Fallback to cl100k_base if specific encoding not found
         return tiktoken.get_encoding("cl100k_base")
 
 
 def count_tokens(text):
     """Count the number of tokens in a text string or content blocks."""
-    encoder = get_encoder()
+    encoder = get_encoder(CONFIG["model"])
 
     # Handle different content types
     if text is None:
@@ -76,39 +87,23 @@ def count_tokens(text):
 
 
 def execute_tool_call(tool_call):
-    """
-    Execute a tool call based on its name and input.
-
-    Args:
-        tool_call: Dictionary with tool details and input
-
-    Returns:
-        The result of the tool execution
-    """
-    tool_name = tool_call["name"]
-    tool_input = tool_call["input"]
-
-    console.print(f"[bold yellow]Executing tool:[/bold yellow] {tool_name}")
-    logging.info(f"Starting tool execution: {tool_name}")
-    logging.info(f"Tool input: {tool_input}")
-
+    """Execute a tool call and return the result."""
     try:
+        tool_name = tool_call.get("name", "")
+        tool_input = tool_call.get("input", {})
+
+        logging.info(f"Executing tool: {tool_name}")
+        logging.info(f"Tool input: {tool_input}")
+
         if tool_name == "google_search":
-            query = tool_input.get("query", tool_input.get("q", ""))
+            query = tool_input.get("query", "")
             if not query:
                 console.print("[bold red]Error:[/bold red] Empty search query")
                 logging.error("Empty search query provided to google_search tool")
                 return {"error": "Empty search query"}
 
             console.print(f"[dim]Searching for:[/dim] {query}")
-            logging.info(f"Google search query: {query}")
-            result = google_search(query)
-            # Break long line into multiple lines
-            msg = "Google search completed. "
-            msg += f"Result type: {type(result).__name__}"
-            logging.info(msg)
-            logging.debug(f"Google search result: {result}")
-            return result
+            return google_search(query)
 
         elif tool_name == "web_research":
             url = tool_input.get("url", "")
@@ -117,24 +112,26 @@ def execute_tool_call(tool_call):
             logging.info(f"Web research: query='{query}', url='{url}'")
             try:
                 result = web_research(url, query)
-                # Break long line into multiple lines
-                msg = "Web research completed. "
-                msg += f"Result type: {type(result).__name__}"
-                logging.info(msg)
-                # Ensure result is a dictionary before converting to JSON
-                if not isinstance(result, dict):
-                    # Break long line into multiple lines
-                    msg = "Web research returned non-dict result: "
-                    msg += f"{type(result).__name__}"
-                    logging.warning(msg)
-                    result = {
-                        "error": "Invalid response format",
-                        "raw_result": str(result),
-                    }
+
+                # If the result is missing the 'answer' field, add a default message
+                if "answer" not in result and "error" not in result:
+                    default_msg = (
+                        "The research was completed but no specific answer was found."
+                    )
+                    result = {**result, "answer": default_msg}
+
                 logging.info(
                     f"Web research completed. Result type: {type(result).__name__}"
                 )
                 logging.debug(f"Web research result: {result}")
+
+                # Display information about the saved file if available
+                if "_saved_to_file" in result:
+                    saved_path = result.pop("_saved_to_file")  # Remove from result
+                    console.print(
+                        f"[dim]Research saved to:[/dim] [blue]{saved_path}[/blue]"
+                    )
+
                 return result
             except Exception as e:
                 error_msg = f"Web research error: {str(e)}"
@@ -143,26 +140,16 @@ def execute_tool_call(tool_call):
                 return {"error": error_msg}
 
         elif tool_name == "notion_agent":
+            # Redirect to workspace_agent
             query = tool_input.get("query", "")
             if not query:
-                console.print("[bold red]Error:[/bold red] Empty Notion query")
-                return {"error": "Empty Notion query"}
+                console.print("[bold red]Error:[/bold red] Empty document query")
+                return {"error": "Empty document query"}
 
-            console.print(f"[dim]Processing Notion operation:[/dim] {query}")
-            result = notion_agent(query)
+            console.print(f"[dim]Processing document operation:[/dim] {query}")
+            return workspace_agent(query)
 
-            # Log the result for debugging
-            logging.info(f"Notion agent result: {result}")
-
-            # If there's an error, display it
-            if "error" in result:
-                console.print(
-                    f"[bold red]Notion agent error:[/bold red] {result['error']}"
-                )
-
-            return result
-
-        # Keep workspace_agent for backward compatibility
+        # Update workspace_agent to use the new function
         elif tool_name == "workspace_agent":
             query = tool_input.get("query", "")
             if not query:
@@ -170,7 +157,38 @@ def execute_tool_call(tool_call):
                 return {"error": "Empty workspace query"}
 
             console.print(f"[dim]Processing document operation:[/dim] {query}")
-            return notion_agent(query)  # Redirect to notion_agent
+            return workspace_agent(query)
+
+        elif tool_name == "deepsearch":
+            query = tool_input.get("query", "")
+            context = tool_input.get("context", "")
+            max_depth = tool_input.get("max_depth", None)
+
+            if not query:
+                console.print("[bold red]Error:[/bold red] Empty DeepSearch query")
+                return {"error": "Empty DeepSearch query"}
+
+            console.print(f"[dim]Invoking DeepSearch sub-task:[/dim] {query}")
+            logging.info(f"DeepSearch sub-task: query='{query}'")
+
+            try:
+                result = deepsearch_tool(query, context)
+                msg = "DeepSearch completed. "
+                msg += f"Result type: {type(result).__name__}"
+                logging.info(msg)
+
+                # If there's an error, display it
+                if "error" in result:
+                    console.print(
+                        f"[bold red]DeepSearch error:[/bold red] {result['error']}"
+                    )
+
+                return result
+            except Exception as e:
+                error_msg = f"DeepSearch error: {str(e)}"
+                logging.error(error_msg)
+                logging.error(f"Exception type: {type(e).__name__}", exc_info=True)
+                return {"error": error_msg}
 
         else:
             error_msg = f"Unknown tool: {tool_name}"
