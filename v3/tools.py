@@ -4,9 +4,9 @@ import json
 import os
 import anthropic
 import time
+import uuid
 from typing import Dict, Any
 from config import CONFIG, SYSTEM_PROMPT, TOOLS
-import datetime
 
 # Define a maximum recursion depth to prevent infinite loops
 MAX_DEEPSEARCH_DEPTH = 2
@@ -29,10 +29,63 @@ def google_search(q: str) -> Dict[str, Any]:
         logging.info(
             f"Search for '{q}' returned {len(result.get('items', []))} results"
         )
+
+        # Save search results to a JSON file
+        _save_search_to_json(q, result)
+
         return result
     except Exception as e:
         logging.error(f"Search error: {e}")
-        return {"error": str(e), "items": []}
+        error_result = {"error": str(e), "items": []}
+
+        # Save error result to a JSON file
+        _save_search_to_json(q, error_result)
+
+        return error_result
+
+
+def _save_search_to_json(query: str, result: Dict[str, Any]) -> None:
+    """
+    Save Google search results to a JSON file in the workspace directory.
+
+    Args:
+        query: The search query
+        result: The search result dictionary
+    """
+    try:
+        # Ensure workspace directory exists
+        workspace_dir = _ensure_workspace_dir()
+
+        # Create a searches directory if it doesn't exist
+        searches_dir = os.path.join(workspace_dir, "searches")
+        if not os.path.exists(searches_dir):
+            os.makedirs(searches_dir)
+
+        # Create a filename using UUID for uniqueness
+        unique_id = str(uuid.uuid4())
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"search_{timestamp}_{unique_id}.json"
+        filepath = os.path.join(searches_dir, filename)
+
+        # Create metadata to include with the results
+        search_data = {
+            "query": query,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "results": result,
+        }
+
+        # Write to file with pretty formatting
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(search_data, f, indent=2, ensure_ascii=False)
+
+        logging.info(f"Saved search results to {filepath}")
+
+        # Add file path to result for reference
+        result["_saved_to_file"] = filepath
+
+    except Exception as e:
+        logging.error(f"Failed to save search to JSON: {e}")
+        # Don't raise the exception, just log it
 
 
 def web_research(url: str, query: str) -> Dict[str, Any]:
@@ -91,13 +144,9 @@ def _save_research_to_markdown(url: str, query: str, result: Dict[str, Any]) -> 
         if not os.path.exists(research_dir):
             os.makedirs(research_dir)
 
-        # Create a filename based on timestamp and sanitized query
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Sanitize query for filename (remove special chars, limit length)
-        sanitized_query = "".join(c for c in query if c.isalnum() or c.isspace())
-        sanitized_query = sanitized_query.replace(" ", "_")[:50]  # Limit length
-
-        filename = f"{timestamp}_{sanitized_query}.md"
+        # Create a filename using UUID for uniqueness
+        unique_id = str(uuid.uuid4())
+        filename = f"{unique_id}.md"
         filepath = os.path.join(research_dir, filename)
 
         # Format the content
