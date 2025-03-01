@@ -1,16 +1,15 @@
-import os
 import sys
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.models import WorkspaceQuery, DocumentOperation
+from app.models import WorkspaceQuery
 from app.document_manager import DocumentManager
-from app.utils import get_workspace_dir, get_workspace_summary
+from app.utils import get_workspace_summary
 from app.anthropic_client import AnthropicClient
 
 # -------------------------------------------------------------------------
@@ -510,13 +509,14 @@ async def process_workspace_query(query: WorkspaceQuery):
         "3. When adding new sections, place them in the logical position in the document.\n"
         "4. When updating content, preserve existing formatting unless explicitly asked to change it.\n"
         "5. Always validate document structure after making changes.\n\n"
-        "CITATION AND REFERENCE GUIDELINES:\n"
-        "1. Always cite sources when adding factual information to documents.\n"
-        "2. Use a consistent citation format (e.g., [1], [2], etc.) within the text.\n"
-        "3. Maintain a 'References' or 'Bibliography' section at the end of each document.\n"
-        "4. When updating a document, check if it has a References section - if not, create one.\n"
-        "5. When adding new information with citations, add the corresponding references to the References section.\n"
-        "6. Include full citation details: author, title, publication, date, URL (if applicable).\n\n"
+        "CITATION AND REFERENCE GUIDELINES (CRITICAL - ALWAYS FOLLOW THESE):\n"
+        "1. ALWAYS preserve citation information provided in the user's request.\n"
+        "2. NEVER remove or modify citation numbers [1], [2], etc. within the text.\n"
+        "3. ALWAYS maintain the 'References' section exactly as provided in the user's request.\n"
+        "4. If the user's request includes citations but no References section, create one at the end.\n"
+        "5. When adding new information with citations, add the corresponding references.\n"
+        "6. Include full citation details: author, title, publication, date, URL (if applicable).\n"
+        "7. The main agent depends on you preserving all citation information exactly as provided.\n\n"
         "ERROR HANDLING:\n"
         "1. If you encounter an error, try an alternative approach rather than giving up.\n"
         "2. For complex operations, break them down into smaller steps.\n"

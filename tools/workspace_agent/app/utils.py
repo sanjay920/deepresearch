@@ -5,6 +5,11 @@ from typing import Dict, List, Optional, Any
 
 def get_workspace_dir() -> str:
     """Get the workspace directory from environment variable or use default."""
+    # First check for V3_WORKSPACE_DIR environment variable
+    v3_workspace = os.environ.get("V3_WORKSPACE_DIR")
+    if v3_workspace:
+        return v3_workspace
+    # Fall back to the original behavior
     return os.environ.get("WORKSPACE_DIR", "./workspace")
 
 
