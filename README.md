@@ -183,6 +183,12 @@ Before running the CLI, make sure you have the following:
    pip install -r requirements.txt
    ```
 
+3. Set Anthropic API Key Environment Variable
+
+```bash
+export ANTHROPIC_API_KEY="<YOUR_ANTHROPIC_API_KEY>"
+```
+
 ### Running the CLI
 
 To start a new chat session with the CLI:
