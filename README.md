@@ -155,8 +155,59 @@ Once running, the services will be available at:
 - Firecrawl: <http://localhost:8084>
 - Gemini: <http://localhost:8090>
 
-## Troubleshooting
+## Getting Started with the CLI
 
-- **Port Conflicts**: If you encounter port conflicts, modify the port mappings in the docker-compose.yml file.
-- **Network Issues**: The `extra_hosts` configuration allows services to communicate with each other using `host.docker.internal`. If you experience connectivity issues, verify this is working correctly for your Docker setup.
-- **API Limits**: Be aware of rate limits and quotas for the external APIs being used.
+### Prerequisites
+
+Before running the CLI, make sure you have the following:
+
+- Python 3.8+ installed
+- API keys for the required services:
+  - Anthropic Claude API
+  - Google API (with Custom Search enabled)
+  - Firecrawl API
+  - Google Cloud Platform (with Vertex AI enabled)
+
+### Installation
+
+1. Clone the repository and navigate to the v3 directory:
+
+   ```bash
+   git clone <repository-url>
+   cd <repository-name>/v3
+   ```
+
+2. Install the required dependencies:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+### Running the CLI
+
+To start a new chat session with the CLI:
+
+```bash
+python cli.py
+```
+
+#### Command-line Arguments
+
+The CLI supports the following arguments:
+
+- `--chat-id`: Specify a chat ID to continue from a previous session. If omitted, a new chat ID will be generated.
+
+Example to continue an existing chat:
+
+```bash
+python cli.py --chat-id abc123de
+```
+
+#### CLI Commands
+
+Once the CLI is running, you can use the following commands:
+
+- `exit` or `quit`: Exit the application
+- `thinking:on`: Show Claude's thinking process
+- `thinking:off`: Hide Claude's thinking process
+- `clear`: Clear the conversation history
