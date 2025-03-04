@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   workspace-agent:
@@ -11,7 +11,7 @@ services:
     environment:
       - ANTHROPIC_API_KEY=<YOUR_ANTHROPIC_API_KEY>
     volumes:
-      - /Users/sanjay_acorn/Code/deepresearch-private/v3/workspace:/app/workspace
+      - ./v3/workspace:/app/workspace
     restart: unless-stopped
 
   google-search:
@@ -52,9 +52,8 @@ services:
       - GCP_PROJECT_ID=<YOUR_GCP_PROJECT_ID>
       - GCP_LOCATION=us-central1
     volumes:
-      - /Users/sanjay_acorn/Code/deepresearch-private/usage/google/<YOUR_SERVICE_ACCOUNT_FILE>.json:/app/service-account.json
+      - <YOUR_SERVICE_ACCOUNT_FILE>.json:/app/service-account.json
     restart: unless-stopped
     # Add extra_hosts to allow gemini to call firecrawl via host.docker.internal
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
