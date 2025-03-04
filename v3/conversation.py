@@ -158,3 +158,19 @@ class Conversation:
                     )
 
         return visible_messages
+
+    def save_to_disk(self, filepath: str):
+        """Save the entire conversation to a JSON file."""
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(self.messages, f, indent=2)
+        except Exception as e:
+            logging.error(f"Error saving conversation to {filepath}: {str(e)}")
+
+    def load_from_disk(self, filepath: str):
+        """Load conversation from a JSON file (overwrites current messages)."""
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                self.messages = json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading conversation from {filepath}: {str(e)}")

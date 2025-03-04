@@ -18,19 +18,8 @@ from tools import (
 from rich.spinner import Spinner
 from rich.live import Live
 import os
-from rich.console import Console
-from conversation import Conversation
-from config import CONFIG, SYSTEM_PROMPT, TOOLS, append_timestamp_to_message
-from tools import (
-    google_search,
-    web_research,
-    notion_agent,
-    workspace_agent,
-    deepsearch_tool,
-)
-from rich.spinner import Spinner
-from rich.live import Live
-import tiktoken
+import uuid
+import argparse
 
 # Setup console and logging
 console = Console()
@@ -153,15 +142,23 @@ def execute_tool_call(tool_call):
             console.print(f"[dim]Processing document operation:[/dim] {query}")
             return workspace_agent(query)
 
-        # Update workspace_agent to use the new function
         elif tool_name == "workspace_agent":
             query = tool_input.get("query", "")
             if not query:
                 console.print("[bold red]Error:[/bold red] Empty workspace query")
                 return {"error": "Empty workspace query"}
 
-            console.print(f"[dim]Processing document operation:[/dim] {query}")
-            return workspace_agent(query)
+            # Get the chat ID from the environment or global variable
+            # Extract just the chat ID from the workspace path if needed
+            chat_dir = os.path.basename(os.environ.get("WORKSPACE_DIR", ""))
+            chat_id = None
+            if chat_dir.startswith("chat_"):
+                chat_id = chat_dir[5:]  # Remove "chat_" prefix
+
+            console.print(
+                f"[dim]Processing document operation for chat {chat_id}:[/dim] {query}"
+            )
+            return workspace_agent(query, chat_id=chat_id)
 
         elif tool_name == "deepsearch":
             query = tool_input.get("query", "")
@@ -205,6 +202,18 @@ def execute_tool_call(tool_call):
         return {"error": error_msg}
 
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Deep Search CLI with Chat ID Support")
+    parser.add_argument(
+        "--chat-id",
+        type=str,
+        default=None,
+        help="Specify a chat ID to continue from. If omitted, a new one is generated.",
+    )
+    return parser.parse_args()
+
+
 def main():
     """
     Main CLI interface for conversing with Claude and displaying thinking.
@@ -218,9 +227,43 @@ def main():
       conversation with results
     - Thinking display: Shows Claude's thinking process (can be toggled on/off)
     """
+    # Parse command-line arguments for chat_id
+    args = parse_args()
+
+    # Create a conversations directory to store all chat histories
+    conversations_dir = os.path.join(".", "workspace", "conversations")
+    os.makedirs(conversations_dir, exist_ok=True)
+
+    if args.chat_id is None:
+        # Create a new chat ID
+        chat_id = str(uuid.uuid4())[:8]  # Short UUID for readability
+        console.print(f"[bold green]Starting NEW chat with ID: {chat_id}[/bold green]")
+    else:
+        chat_id = args.chat_id
+        console.print(f"[bold green]Continuing chat with ID: {chat_id}[/bold green]")
+
+    # Set up a unique workspace dir for this chat (for documents)
+    workspace_path = os.path.join(".", "workspace", f"chat_{chat_id}")
+    os.environ["WORKSPACE_DIR"] = workspace_path
+    os.makedirs(workspace_path, exist_ok=True)
+    console.print(f"[dim]Workspace directory: {workspace_path}[/dim]")
+
+    # Store conversation file in the main conversations directory
+    conversation_file = os.path.join(conversations_dir, f"{chat_id}.json")
+
+    conversation = Conversation()
+    if os.path.exists(conversation_file):
+        console.print(
+            f"[dim]Loading existing conversation from {conversation_file}[/dim]"
+        )
+        conversation.load_from_disk(conversation_file)
+    else:
+        console.print(f"[dim]No previous conversation found; starting fresh.[/dim]")
+
+    # Print welcome panel
     console.print(
         Panel.fit(
-            "[bold blue]Deep Search[/bold blue]",
+            "[bold blue]Deep Search[/bold blue]\n" f"Chat ID: {chat_id}",
             title="Welcome",
         )
     )
@@ -232,8 +275,11 @@ def main():
 
     # Initialize Anthropic client
     client = anthropic.Anthropic(api_key=CONFIG["anthropic_api_key"])
-    conversation = Conversation()
     show_thinking = True  # Default to showing thinking
+
+    # Store the chat_id in a global variable so tools can access it
+    global current_chat_id
+    current_chat_id = chat_id
 
     while True:
         user_input = console.input("\n[bold green]You:[/bold green] ")
@@ -270,6 +316,9 @@ def main():
 
         # Process streaming conversation with tool calls
         process_conversation(client, conversation, show_thinking)
+
+        # Save conversation to disk after each user input + assistant response
+        conversation.save_to_disk(conversation_file)
 
 
 def trim_thinking_tokens(conversation, max_tokens=80000):

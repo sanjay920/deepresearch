@@ -298,15 +298,14 @@ def _save_research_to_markdown(url: str, query: str, result: Dict[str, Any]) -> 
         # Ensure workspace directory exists
         workspace_dir = _ensure_workspace_dir()
 
-        # Create a research directory if it doesn't exist
-        research_dir = os.path.join(workspace_dir, "research")
-        if not os.path.exists(research_dir):
-            os.makedirs(research_dir)
+        # Create a reports directory if it doesn't exist
+        reports_dir = os.path.join(workspace_dir, "reports")
+        if not os.path.exists(reports_dir):
+            os.makedirs(reports_dir)
 
-        # Create a filename using UUID for uniqueness
         unique_id = str(uuid.uuid4())
         filename = f"{unique_id}.md"
-        filepath = os.path.join(research_dir, filename)
+        filepath = os.path.join(reports_dir, filename)
 
         # Format the content
         content = f"# Web Research: {query}\n\n"
@@ -491,62 +490,44 @@ def notion_agent(query: str) -> Dict[str, Any]:
         }
 
 
-def workspace_agent(query: str) -> Dict[str, Any]:
-    """
-    Sends a natural language query to the Document Workspace agent.
-
-    Args:
-        query: Natural language instruction for document operations
-
-    Returns:
-        Dict containing the response from the Workspace agent
-    """
+def workspace_agent(query: str, chat_id: str = None):
+    """Send a query to the workspace agent."""
     try:
+        workspace_url = "http://localhost:8091/workspace/query"
+
+        payload = {"query": query}
+        if chat_id:
+            payload["chat_id"] = chat_id
+            print(f"Sending query to workspace agent: {query}. chat_id: {chat_id}")
+
         response = requests.post(
-            "http://localhost:8091/workspace/query", json={"query": query}, timeout=180
+            workspace_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=300,
         )
-        response.raise_for_status()
-        result = response.json()
-        logging.info(f"Workspace agent query completed: {query}")
 
-        # Extract the most relevant information from the result
-        operations_summary = ""
-
-        # Check if there are tool results in the response
-        if "tool_results" in result and result["tool_results"]:
-            operations_summary = "Operations performed:\n"
-
-            for i, tool_result in enumerate(result["tool_results"], 1):
-                tool_name = tool_result.get("tool", "unknown")
-                result_data = tool_result.get("result", {})
-
-                # Extract information based on the tool type
-                if result_data.get("success", False):
-                    message = result_data.get("message", "Operation completed")
-                    operations_summary += f"{i}. {message}\n"
-                else:
-                    error_msg = result_data.get("message", "Operation failed")
-                    operations_summary += f"{i}. Error: {error_msg}\n"
-
-        return {
-            "status": result.get("status", "unknown"),
-            "message": result.get("message", ""),
-            "operations_summary": operations_summary,
-            "correlation_id": result.get("correlation_id", ""),
-        }
+        if response.status_code == 200:
+            return response.json()
+        else:
+            error_msg = (
+                f"Workspace agent error: {response.status_code} - {response.text}"
+            )
+            logging.error(error_msg)
+            return {"error": error_msg}
     except Exception as e:
-        error_msg = f"Workspace agent error: {str(e)}"
+        error_msg = f"Workspace agent request failed: {str(e)}"
         logging.error(error_msg)
-        return {
-            "error": error_msg,
-            "message": f"Failed to process document operation: {str(e)}",
-        }
+        return {"error": error_msg}
 
 
 # Document manipulation functions
-def _ensure_workspace_dir():
-    """Ensures the workspace directory exists."""
-    workspace_dir = "./workspace"
+def _ensure_workspace_dir() -> str:
+    """
+    Ensures the workspace directory exists.
+    Uses WORKSPACE_DIR if set, else falls back to ./workspace
+    """
+    workspace_dir = os.environ.get("WORKSPACE_DIR", "./workspace")
     if not os.path.exists(workspace_dir):
         os.makedirs(workspace_dir)
     return workspace_dir
