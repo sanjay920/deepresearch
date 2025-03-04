@@ -1,6 +1,7 @@
 import sys
 import logging
 import uuid
+import os
 from datetime import datetime
 from typing import Dict, Any
 
@@ -9,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.models import WorkspaceQuery
 from app.document_manager import DocumentManager
-from app.utils import get_workspace_summary
+from app.utils import get_workspace_summary, get_workspace_dir
 from app.anthropic_client import AnthropicClient
 
 # -------------------------------------------------------------------------
@@ -264,23 +265,25 @@ DOCUMENT_TOOLS = [
 # -------------------------------------------------------------------------
 # Tool Execution Functions
 # -------------------------------------------------------------------------
-def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute a tool call based on the tool name and input."""
+def execute_tool_call(
+    tool_name: str, tool_input: Dict[str, Any], workspace_dir: str
+) -> Dict[str, Any]:
+    """
+    Execute a tool call based on the tool name and input,
+    passing in the chosen workspace_dir.
+    """
     logger.info(f"Executing tool call: {tool_name} with input: {tool_input}")
 
     try:
         if tool_name == "create_document":
             file_name = tool_input.get("file_name", "")
             text_content = tool_input.get("text_content", "")
-
-            result = DocumentManager.create_document(file_name, text_content)
-
+            result = DocumentManager.create_document(
+                file_name, text_content, workspace_dir=workspace_dir
+            )
             if "error" in result:
                 return {"success": False, "message": result["error"]}
-
-            # Get the actual filename that was used (might be UUID-generated)
             actual_filename = result["file_name"]
-
             return {
                 "success": True,
                 "message": f"Document {actual_filename} created successfully",
@@ -291,12 +294,11 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
             file_name = tool_input.get("file_name", "")
             section_name = tool_input.get("section_name", "")
             text_content = tool_input.get("text_content", "")
-
-            result = DocumentManager.add_section(file_name, section_name, text_content)
-
+            result = DocumentManager.add_section(
+                file_name, section_name, text_content, workspace_dir=workspace_dir
+            )
             if "error" in result:
                 return {"success": False, "message": result["error"]}
-
             return {
                 "success": True,
                 "message": f"Section {section_name} added to {file_name}",
@@ -308,12 +310,11 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
             file_name = tool_input.get("file_name", "")
             section_name = tool_input.get("section_name", "")
             text_content = tool_input.get("text_content", "")
-
-            result = DocumentManager.append_block(file_name, section_name, text_content)
-
+            result = DocumentManager.append_block(
+                file_name, section_name, text_content, workspace_dir=workspace_dir
+            )
             if "error" in result:
                 return {"success": False, "message": result["error"]}
-
             return {
                 "success": True,
                 "message": f"Text appended to section {section_name} in {file_name}",
@@ -325,14 +326,11 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
             file_name = tool_input.get("file_name", "")
             section_name = tool_input.get("section_name", "")
             text_content = tool_input.get("text_content", "")
-
             result = DocumentManager.replace_section(
-                file_name, section_name, text_content
+                file_name, section_name, text_content, workspace_dir=workspace_dir
             )
-
             if "error" in result:
                 return {"success": False, "message": result["error"]}
-
             return {
                 "success": True,
                 "message": f"Section {section_name} replaced in {file_name}",
@@ -343,12 +341,11 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
         elif tool_name == "remove_section":
             file_name = tool_input.get("file_name", "")
             section_name = tool_input.get("section_name", "")
-
-            result = DocumentManager.remove_section(file_name, section_name)
-
+            result = DocumentManager.remove_section(
+                file_name, section_name, workspace_dir=workspace_dir
+            )
             if "error" in result:
                 return {"success": False, "message": result["error"]}
-
             return {
                 "success": True,
                 "message": f"Section {section_name} removed from {file_name}",
@@ -360,12 +357,11 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
             file_name = tool_input.get("file_name", "")
             section_name = tool_input.get("section_name", "")
             new_name = tool_input.get("new_name", "")
-
-            result = DocumentManager.rename_section(file_name, section_name, new_name)
-
+            result = DocumentManager.rename_section(
+                file_name, section_name, new_name, workspace_dir=workspace_dir
+            )
             if "error" in result:
                 return {"success": False, "message": result["error"]}
-
             return {
                 "success": True,
                 "message": f"Section {section_name} renamed to {new_name} in {file_name}",
@@ -376,12 +372,11 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
         elif tool_name == "export_document":
             file_name = tool_input.get("file_name", "")
             export_format = tool_input.get("export_format", "")
-
-            result = DocumentManager.export_document(file_name, export_format)
-
+            result = DocumentManager.export_document(
+                file_name, export_format, workspace_dir=workspace_dir
+            )
             if "error" in result:
                 return {"success": False, "message": result["error"]}
-
             return {
                 "success": True,
                 "message": f"Document {file_name} exported to {export_format} format",
@@ -390,8 +385,7 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
             }
 
         elif tool_name == "list_documents":
-            documents = DocumentManager.list_documents()
-
+            documents = DocumentManager.list_documents(workspace_dir=workspace_dir)
             return {
                 "success": True,
                 "message": f"Found {len(documents)} documents in workspace",
@@ -400,12 +394,11 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
 
         elif tool_name == "get_document_content":
             file_name = tool_input.get("file_name", "")
-
-            result = DocumentManager.get_document_content(file_name)
-
+            result = DocumentManager.get_document_content(
+                file_name, workspace_dir=workspace_dir
+            )
             if "error" in result:
                 return {"success": False, "message": result["error"]}
-
             return {
                 "success": True,
                 "message": f"Retrieved content of {file_name}",
@@ -414,11 +407,13 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
             }
 
         elif tool_name == "get_workspace_summary":
-            summary = get_workspace_summary()
-
+            summary = get_workspace_summary(workspace_dir=workspace_dir)
             return {
                 "success": True,
-                "message": f"Retrieved workspace summary with {len(summary['documents'])} documents",
+                "message": (
+                    f"Retrieved workspace summary with "
+                    f"{len(summary['documents'])} documents"
+                ),
                 "summary": summary,
             }
 
@@ -427,14 +422,15 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
             section_name = tool_input.get("section_name", "")
             text_content = tool_input.get("text_content", "")
             position = tool_input.get("position", "")
-
             result = DocumentManager.insert_section(
-                file_name, section_name, text_content, position
+                file_name,
+                section_name,
+                text_content,
+                position,
+                workspace_dir=workspace_dir,
             )
-
             if "error" in result:
                 return {"success": False, "message": result["error"]}
-
             return {
                 "success": True,
                 "message": f"Section {section_name} inserted at {position} in {file_name}",
@@ -444,16 +440,18 @@ def execute_tool_call(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, A
 
         elif tool_name == "validate_document":
             file_name = tool_input.get("file_name", "")
-
-            result = DocumentManager.validate_document(file_name)
-
+            result = DocumentManager.validate_document(
+                file_name, workspace_dir=workspace_dir
+            )
             if "error" in result:
                 return {"success": False, "message": result["error"]}
-
             if result.get("issues_found", False):
                 return {
                     "success": True,
-                    "message": f"Document {file_name} validated and issues fixed: {result.get('fixed_issues', '')}",
+                    "message": (
+                        f"Document {file_name} validated and issues fixed: "
+                        f"{result.get('fixed_issues', '')}"
+                    ),
                     "file_name": file_name,
                     "fixed_issues": result.get("fixed_issues", ""),
                 }
@@ -488,109 +486,85 @@ async def process_workspace_query(query: WorkspaceQuery):
     This endpoint acts as a natural language interface to all document operations.
     """
     correlation_id = str(uuid.uuid4())
-    logger.info(
-        f"Processing workspace query (correlation_id: {correlation_id}): {query.query}"
+    logger.info(f"Processing workspace query (corr_id={correlation_id}): {query.query}")
+
+    subdir = query.chat_id  # e.g. "chat_38fa4053", or None
+    print("The chat_id is:", subdir)
+
+    # Get or create the correct workspace directory
+    final_workspace_path = get_workspace_dir(subdirectory=subdir)
+    logger.info(f"Using workspace directory: {final_workspace_path}")
+
+    # Pre-fetch the current workspace summary
+    current_workspace_summary = get_workspace_summary(
+        workspace_dir=final_workspace_path
     )
 
-    # System instruction for the document agent
-    system_instruction = (
-        "You are a document workspace agent that can create, edit, and manage markdown documents. "
-        "Your task is to understand the user's request and use the appropriate tools to fulfill it. "
-        "You are responsible for ALL document operations - the main agent will delegate document tasks to you completely.\n\n"
-        "DOCUMENT OPERATION WORKFLOW:\n"
-        "1. Analyze the user's request to understand what document operations are needed.\n"
-        "2. Plan the sequence of operations required (get content, modify, validate, update).\n"
-        "3. Execute all necessary operations using your internal tools.\n"
-        "4. Validate the final document structure before completing the task.\n"
-        "5. Provide a clear summary of what was done.\n\n"
-        "DOCUMENT STRUCTURE GUIDELINES:\n"
-        "1. Maintain clean, consistent document structure with proper heading hierarchy.\n"
-        "2. Avoid duplicate headings or sections - check for duplicates before saving.\n"
-        "3. When adding new sections, place them in the logical position in the document.\n"
-        "4. When updating content, preserve existing formatting unless explicitly asked to change it.\n"
-        "5. Always validate document structure after making changes.\n\n"
-        "CITATION AND REFERENCE GUIDELINES (CRITICAL - ALWAYS FOLLOW THESE):\n"
-        "1. ALWAYS preserve citation information provided in the user's request.\n"
-        "2. NEVER remove or modify citation numbers [1], [2], etc. within the text.\n"
-        "3. ALWAYS maintain the 'References' section exactly as provided in the user's request.\n"
-        "4. If the user's request includes citations but no References section, create one at the end.\n"
-        "5. When adding new information with citations, add the corresponding references.\n"
-        "6. Include full citation details: author, title, publication, date, URL (if applicable).\n"
-        "7. The main agent depends on you preserving all citation information exactly as provided.\n\n"
-        "ERROR HANDLING:\n"
-        "1. If you encounter an error, try an alternative approach rather than giving up.\n"
-        "2. For complex operations, break them down into smaller steps.\n"
-        "3. If a document has structural issues, fix them before proceeding with the requested operation.\n"
-        "4. Always verify the final result matches what was requested."
+    # Build a user-facing context string
+    if not current_workspace_summary["documents"]:
+        workspace_context = "The workspace is empty. No documents exist yet."
+    else:
+        workspace_context = f"The workspace contains {len(current_workspace_summary['documents'])} documents:\n"
+        for doc in current_workspace_summary["documents"]:
+            workspace_context += (
+                f"- {doc['file_name']} with sections: {', '.join(doc['sections'])}\n"
+            )
+
+    # System instruction
+    SYSTEM_INSTRUCTION = """
+    You are a document workspace management assistant that helps users create, modify, and manage markdown documents.
+    Your capabilities include:
+    1. Document creation/management, 2. Section operations, 3. Validation and organization, 
+    4. Export functions, and 5. Workspace summary retrieval.
+    Follow user requests carefully and use the provided tools to complete them.
+    """
+
+    prompt = (
+        f"User request: {query.query}\n\n"
+        f"Current workspace state:\n{workspace_context}\n\n"
+        "Determine what document operation to perform. Use the appropriate tool.\n"
     )
 
     try:
-        # Get the current workspace state to provide context
-        workspace_summary = get_workspace_summary()
-
-        # Construct the prompt with the workspace context
-        workspace_context = "Current workspace state:\n"
-
-        if not workspace_summary["documents"]:
-            workspace_context += (
-                "The workspace is currently empty. No documents exist yet."
-            )
-        else:
-            workspace_context += f"The workspace contains {len(workspace_summary['documents'])} documents:\n"
-            for doc in workspace_summary["documents"]:
-                workspace_context += f"- {doc['file_name']} with sections: {', '.join(doc['sections'])}\n"
-
-        prompt = (
-            f"User request: {query.query}\n\n"
-            f"{workspace_context}\n\n"
-            "Based on the user's request and the current workspace state, determine what document operation to perform. "
-            "Use the appropriate tool to fulfill the request."
-        )
-
-        # Call Anthropic with tools
+        # Call Anthropic with the recognized tools
         response = anthropic_client.generate_with_tools(
-            prompt=prompt, system_instruction=system_instruction, tools=DOCUMENT_TOOLS
+            prompt=prompt,
+            system_instruction=SYSTEM_INSTRUCTION,
+            tools=DOCUMENT_TOOLS,
         )
 
-        # Process tool calls if any
         tool_results = []
         for tool_call in response.get("tool_calls", []):
             tool_name = tool_call["name"]
             tool_input = tool_call["input"]
 
-            logger.info(f"Executing tool call: {tool_name} with input: {tool_input}")
-
-            # Execute the tool call
-            result = execute_tool_call(tool_name, tool_input)
+            # Execute the tool call, passing the correct workspace directory
+            result = execute_tool_call(
+                tool_name, tool_input, workspace_dir=final_workspace_path
+            )
             tool_results.append(
                 {"tool": tool_name, "input": tool_input, "result": result}
             )
 
-        # Construct the final response
         if tool_results:
-            # If tools were used, summarize the results
             success_count = sum(1 for r in tool_results if r["result"]["success"])
             failure_count = len(tool_results) - success_count
-
             status = (
                 "success"
                 if failure_count == 0
                 else "partial_success" if success_count > 0 else "failure"
             )
-
-            # Construct a message summarizing what was done
             message = response.get("text", "")
             if not message:
                 if status == "success":
                     message = "I've successfully completed your request."
                 elif status == "partial_success":
-                    message = "I've partially completed your request. Some operations succeeded, but others failed."
+                    message = "I've partially completed your request. Some operations succeeded, some failed."
                 else:
                     message = "I couldn't complete your request due to errors."
 
-                # Add details about each operation
-                for result in tool_results:
-                    message += f"\n- {result['result']['message']}"
+                for r in tool_results:
+                    message += f"\n- {r['result']['message']}"
 
             return {
                 "correlation_id": correlation_id,
@@ -600,14 +574,12 @@ async def process_workspace_query(query: WorkspaceQuery):
                 "tool_results": tool_results,
             }
         else:
-            # If no tools were used, just return the model's response
             return {
                 "correlation_id": correlation_id,
                 "query": query.query,
                 "status": "success",
                 "message": response.get(
-                    "text",
-                    "I understood your request but didn't need to perform any document operations.",
+                    "text", "I understood your request but did not need any tool calls."
                 ),
                 "tool_results": [],
             }

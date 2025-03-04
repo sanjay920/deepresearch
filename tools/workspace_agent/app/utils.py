@@ -1,34 +1,59 @@
 import os
 import re
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 
-def get_workspace_dir() -> str:
-    """Get the workspace directory from environment variable or use default."""
-    # First check for V3_WORKSPACE_DIR environment variable
-    v3_workspace = os.environ.get("V3_WORKSPACE_DIR")
-    if v3_workspace:
-        return v3_workspace
-    # Fall back to the original behavior
-    return os.environ.get("WORKSPACE_DIR", "./workspace")
+def format_subdirectory(subdirectory: str) -> str:
+    """Ensure subdirectory has 'chat_' prefix."""
+    if subdirectory and not subdirectory.startswith("chat_"):
+        return f"chat_{subdirectory}"
+    return subdirectory
 
 
-def ensure_workspace_exists() -> None:
-    """Ensure the workspace directory exists."""
-    workspace_dir = get_workspace_dir()
+def extract_subdirectory(query: str) -> Tuple[str, str]:
+    """Extract subdirectory instruction from query if present."""
+    subdirectory_pattern = (
+        r"[Uu]se\s+workspace\s+subdirectory\s+['\"]([^'\"]+)['\"]\.?\s*"
+    )
+    match = re.search(subdirectory_pattern, query)
+    if match:
+        subdirectory = match.group(1)
+        clean_query = re.sub(subdirectory_pattern, "", query).strip()
+        return format_subdirectory(subdirectory), clean_query
+    return None, query
+
+
+def get_workspace_dir(subdirectory: str = None) -> str:
+    """
+    Get the workspace directory. If 'subdirectory' is provided, use that.
+    Otherwise, fall back to the default base workspace.
+    """
+    base_dir = os.getenv("WORKSPACE_DIR", "./workspace")
+    if subdirectory:
+        subdirectory = format_subdirectory(subdirectory)
+        full_path = os.path.join(base_dir, subdirectory)
+        os.makedirs(full_path, exist_ok=True)
+        return full_path
+    return base_dir
+
+
+def ensure_workspace_exists(workspace_dir: Optional[str] = None) -> None:
+    """Ensure the workspace directory (optionally specified) exists."""
+    if not workspace_dir:
+        workspace_dir = get_workspace_dir()
     os.makedirs(workspace_dir, exist_ok=True)
 
 
-def list_documents() -> List[str]:
-    """List all markdown documents in the workspace."""
-    workspace_dir = get_workspace_dir()
-    ensure_workspace_exists()
+def list_documents(workspace_dir: Optional[str] = None) -> List[str]:
+    """List all markdown documents in the given (or default) workspace directory."""
+    if not workspace_dir:
+        workspace_dir = get_workspace_dir()
+    ensure_workspace_exists(workspace_dir)
 
     documents = []
     for file in os.listdir(workspace_dir):
         if file.endswith(".md"):
             documents.append(file)
-
     return documents
 
 
@@ -37,14 +62,10 @@ def extract_sections(content: str) -> Dict[str, str]:
     sections = {}
     current_section = None
     section_content = []
-
-    # Add a special "root" section for content before any heading
     root_content = []
 
     for line in content.split("\n"):
-        # Check if line is a heading
         heading_match = re.match(r"^(#{1,6})\s+(.+)$", line)
-
         if heading_match:
             # If we were building a section, save it
             if current_section:
@@ -53,18 +74,15 @@ def extract_sections(content: str) -> Dict[str, str]:
             elif root_content:
                 sections["_root"] = "\n".join(root_content)
                 root_content = []
-
-            # Start a new section
             current_section = heading_match.group(2).strip()
             section_content = [line]
         else:
-            # Add line to current section or root
             if current_section:
                 section_content.append(line)
             else:
                 root_content.append(line)
 
-    # Save the last section
+    # Save last section
     if current_section and section_content:
         sections[current_section] = "\n".join(section_content)
     elif root_content:
@@ -73,9 +91,12 @@ def extract_sections(content: str) -> Dict[str, str]:
     return sections
 
 
-def get_document_summary(file_name: str) -> Dict[str, Any]:
+def get_document_summary(
+    file_name: str, workspace_dir: Optional[str] = None
+) -> Dict[str, Any]:
     """Get a summary of a document, including its sections."""
-    workspace_dir = get_workspace_dir()
+    if not workspace_dir:
+        workspace_dir = get_workspace_dir()
     file_path = os.path.join(workspace_dir, file_name)
 
     if not os.path.isfile(file_path):
@@ -86,20 +107,12 @@ def get_document_summary(file_name: str) -> Dict[str, Any]:
             content = f.read()
 
         sections = extract_sections(content)
-
-        # Create previews for each section
         section_previews = {}
         for section_name, section_content in sections.items():
-            # Skip the root section in previews
             if section_name == "_root":
                 continue
-
-            # Get first 100 characters as preview
-            preview = (
-                section_content.split("\n", 1)[1]
-                if "\n" in section_content
-                else section_content
-            )
+            preview_lines = section_content.split("\n", 1)
+            preview = preview_lines[1] if len(preview_lines) > 1 else section_content
             preview = preview.strip()
             if len(preview) > 100:
                 preview = preview[:97] + "..."
@@ -116,18 +129,19 @@ def get_document_summary(file_name: str) -> Dict[str, Any]:
             "size": len(content),
             "last_modified": os.path.getmtime(file_path),
         }
-
     except Exception as e:
         return {"error": f"Error reading file {file_name}: {str(e)}"}
 
 
-def get_workspace_summary() -> Dict[str, Any]:
-    """Get a summary of all documents in the workspace."""
-    documents = list_documents()
+def get_workspace_summary(workspace_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Get a summary of all documents in the given (or default) workspace directory."""
+    if not workspace_dir:
+        workspace_dir = get_workspace_dir()
+    documents = list_documents(workspace_dir=workspace_dir)
 
     summaries = []
     for doc in documents:
-        summary = get_document_summary(doc)
+        summary = get_document_summary(doc, workspace_dir=workspace_dir)
         if "error" not in summary:
             summaries.append(summary)
 

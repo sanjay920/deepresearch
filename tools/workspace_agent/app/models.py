@@ -8,6 +8,10 @@ class WorkspaceQuery(BaseModel):
     query: str = Field(
         ..., description="Natural language query for document operations"
     )
+    chat_id: Optional[str] = Field(
+        None,
+        description="If present, use this as the workspace subdirectory (e.g. 'chat_123').",
+    )
 
 
 class DocumentOperation(BaseModel):
