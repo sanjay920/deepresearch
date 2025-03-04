@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  workspace-agent:
+    build:
+      context: ./tools/workspace_agent
+      dockerfile: Dockerfile
+    container_name: workspace-agent
+    ports:
+      - "8091:8000"
+    environment:
+      - ANTHROPIC_API_KEY=<YOUR_ANTHROPIC_API_KEY>
+    volumes:
+      - /Users/sanjay_acorn/Code/deepresearch-private/v3/workspace:/app/workspace
+    restart: unless-stopped
+
+  google-search:
+    build:
+      context: ./tools/google_search
+      dockerfile: Dockerfile
+    container_name: google-search-api
+    ports:
+      - "8085:80"
+    environment:
+      - GOOGLE_API_KEY=<YOUR_GOOGLE_API_KEY>
+      - GOOGLE_CSE_ID=<YOUR_GOOGLE_CSE_ID>
+    restart: unless-stopped
+
+  firecrawl:
+    build:
+      context: ./tools/firecrawl
+      dockerfile: Dockerfile
+    container_name: firecrawl-microservice
+    ports:
+      - "8084:80"
+    environment:
+      - FIRECRAWL_API_KEY=<YOUR_FIRECRAWL_API_KEY>
+    restart: unless-stopped
+    # Add extra_hosts to allow firecrawl to call itself via host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  gemini:
+    build:
+      context: ./tools/extract/gemini
+      dockerfile: Dockerfile
+    container_name: gemini-webpage-researcher
+    ports:
+      - "8090:80"
+    environment:
+      - SERVICE_ACCOUNT_FILE=/app/service-account.json
+      - GCP_PROJECT_ID=<YOUR_GCP_PROJECT_ID>
+      - GCP_LOCATION=us-central1
+    volumes:
+      - /Users/sanjay_acorn/Code/deepresearch-private/usage/google/<YOUR_SERVICE_ACCOUNT_FILE>.json:/app/service-account.json
+    restart: unless-stopped
+    # Add extra_hosts to allow gemini to call firecrawl via host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
