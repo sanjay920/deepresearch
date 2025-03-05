@@ -72,7 +72,7 @@ Deep Research uses several microservices to handle different aspects of the rese
 1. **Workspace Agent**: Manages markdown documents and provides a natural language interface for document operations.
 2. **Google Search**: Wrapper around Google Custom Search API for retrieving search results.
 3. **Firecrawl**: Converts websites into LLM-ready markdown for analysis.
-4. **Gemini**: Uses Google's Gemini model to analyze webpage content and answer queries.
+4. **Website Researcher**: Uses Google's Gemini model to analyze webpage content and answer queries.
 
 ## Docker Compose Setup
 
@@ -152,8 +152,8 @@ Once running, the services will be available at:
 
 - Workspace Agent: <http://localhost:8091>
 - Google Search: <http://localhost:8085>
-- Firecrawl: <http://localhost:8084>
-- Gemini: <http://localhost:8090>
+- Firecrawl (for scraping): <http://localhost:8084>
+- Website Researcher: <http://localhost:8090>
 
 ## Getting Started with the CLI
 
